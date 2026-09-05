@@ -14,7 +14,6 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/middleware"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/pagination"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/utils/mapper"
-	workspacepkg "github.com/getarcaneapp/arcane/backend/v2/pkg/workspace"
 	"github.com/getarcaneapp/arcane/types/v2/auth"
 	"github.com/getarcaneapp/arcane/types/v2/base"
 )
@@ -120,9 +119,6 @@ func ReadWorkspaceUploads(form multipart.Form, maxFileSizeBytes int64) (map[int]
 		}
 		if int64(len(content)) > maxFileSizeBytes {
 			return nil, huma.Error413RequestEntityTooLarge(limitMessage)
-		}
-		if err := workspacepkg.ValidateTextContent(content, maxFileSizeBytes); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
 		}
 		uploads[index] = content
 	}

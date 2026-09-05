@@ -119,6 +119,7 @@
 		initialSelection: 'compose',
 		fallbackTab: 'compose',
 		pendingEntries: false,
+		allowBinary: false,
 		isFixedTab: (key) => key === 'compose' || key === 'env' || key === 'override',
 		isTabAvailable: (key) => key !== 'override' || overrideActive,
 		planCreate: planWorkspaceFileCreate,

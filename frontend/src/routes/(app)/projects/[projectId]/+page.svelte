@@ -80,7 +80,7 @@
 		remapWorkspaceFileRecord,
 		remapSelectedWorkspaceFileKey,
 		removeWorkspaceFileRecord,
-		readWorkspaceTextUpload,
+		readWorkspaceUpload,
 		workspaceReadOnlyMessage,
 		type WorkspaceDisplayEntry
 	} from '#lib/utils/workspace-files';
@@ -119,6 +119,7 @@
 	let projectWorkspaceLoadErrors = $state<Record<string, string>>({});
 	let projectWorkspaceLoading = $state<Record<string, boolean>>({});
 	let projectWorkspaceFileMetadata = $state<Record<string, ProjectWorkspaceFileContent>>({});
+	let projectWorkspaceStagedFiles = $state<Record<string, File>>({});
 	let projectWorkspaceFilePromises: Record<string, Promise<IncludeFile | ProjectWorkspaceFileContent> | undefined> = {};
 	const globalVariableMap = $derived(globalVariablesToMap(data.globalVariables));
 	const projectWorkspaceMaxFileSizeMb = $derived($settingsStore?.projectWorkspaceMaxFileSizeMb ?? 10);
@@ -743,7 +744,8 @@
 		const workspaceUpdate = buildWorkspaceMultipartUpdate(
 			projectWorkspaceChanges,
 			{ ...projectWorkspaceContents, ...includeFilesState },
-			{ ...loadedProjectWorkspaceContents, ...loadedIncludeFileContents }
+			{ ...loadedProjectWorkspaceContents, ...loadedIncludeFileContents },
+			projectWorkspaceStagedFiles
 		);
 		let workspaceCommitted = false;
 		isLoading.saving = true;
@@ -772,6 +774,7 @@
 					)
 				};
 				projectWorkspaceChanges = [];
+				projectWorkspaceStagedFiles = {};
 			}
 
 			const updatedProject = await projectService.updateProject(
@@ -1148,6 +1151,7 @@
 		projectWorkspaceLoadErrors = remapWorkspaceFileRecord(projectWorkspaceLoadErrors, oldPath, newPath);
 		projectWorkspaceLoading = remapWorkspaceFileRecord(projectWorkspaceLoading, oldPath, newPath);
 		projectWorkspaceFileMetadata = remapWorkspaceFileRecord(projectWorkspaceFileMetadata, oldPath, newPath);
+		projectWorkspaceStagedFiles = remapWorkspaceFileRecord(projectWorkspaceStagedFiles, oldPath, newPath);
 		includeFilesState = remapWorkspaceFileRecord(includeFilesState, oldPath, newPath);
 		loadedIncludeFileContents = remapWorkspaceFileRecord(loadedIncludeFileContents, oldPath, newPath);
 		includeFilesPanelStates = remapWorkspaceFileRecord(includeFilesPanelStates, oldPath, newPath);
@@ -1168,6 +1172,7 @@
 		projectWorkspaceLoadErrors = removeWorkspaceFileRecord(projectWorkspaceLoadErrors, relativePath);
 		projectWorkspaceLoading = removeWorkspaceFileRecord(projectWorkspaceLoading, relativePath);
 		projectWorkspaceFileMetadata = removeWorkspaceFileRecord(projectWorkspaceFileMetadata, relativePath);
+		projectWorkspaceStagedFiles = removeWorkspaceFileRecord(projectWorkspaceStagedFiles, relativePath);
 		includeFilesState = removeWorkspaceFileRecord(includeFilesState, relativePath);
 		loadedIncludeFileContents = removeWorkspaceFileRecord(loadedIncludeFileContents, relativePath);
 		includeFilesPanelStates = removeWorkspaceFileRecord(includeFilesPanelStates, relativePath);
@@ -1179,12 +1184,15 @@
 		}
 	}
 
-	function createProjectWorkspaceFile(parentPath: string, name: string, content = '') {
+	function createProjectWorkspaceFile(parentPath: string, name: string, content = '', stagedFile?: File) {
 		const relativePath = planProjectWorkspaceFileCreate(projectWorkspacePaths, parentPath, name, composeFileName);
 		if (!relativePath) return;
 		projectWorkspaceChanges = [...projectWorkspaceChanges, { operation: 'create_file', relativePath }];
 		projectWorkspaceContents = { ...projectWorkspaceContents, [relativePath]: content };
 		loadedProjectWorkspaceContents = { ...loadedProjectWorkspaceContents, [relativePath]: content };
+		if (stagedFile) {
+			projectWorkspaceStagedFiles = { ...projectWorkspaceStagedFiles, [relativePath]: stagedFile };
+		}
 		projectWorkspaceFileMetadata = {
 			...projectWorkspaceFileMetadata,
 			[relativePath]: {
@@ -1192,7 +1200,7 @@
 				relativePath,
 				name: workspaceFileBasename(relativePath),
 				size: content.length,
-				mimeType: 'text/plain',
+				mimeType: stagedFile?.type || 'text/plain',
 				content,
 				editable: true
 			}
@@ -1205,9 +1213,30 @@
 	async function uploadProjectWorkspaceFiles(parentPath: string, files: File[]): Promise<string | void> {
 		const file = files[0];
 		if (!file) return m.workspace_upload_file_required();
-		const result = await readWorkspaceTextUpload(file, projectWorkspaceMaxFileSizeMb);
+		const result = await readWorkspaceUpload(file, projectWorkspaceMaxFileSizeMb);
 		if (result.error) return result.error;
-		createProjectWorkspaceFile(parentPath, file.name, result.content ?? '');
+		if (result.binary) {
+			const relativePath = planProjectWorkspaceFileCreate(projectWorkspacePaths, parentPath, file.name, composeFileName);
+			if (!relativePath) return;
+			projectWorkspaceChanges = [...projectWorkspaceChanges, { operation: 'create_file', relativePath }];
+			projectWorkspaceStagedFiles = { ...projectWorkspaceStagedFiles, [relativePath]: file };
+			projectWorkspaceFileMetadata = {
+				...projectWorkspaceFileMetadata,
+				[relativePath]: {
+					path: relativePath,
+					relativePath,
+					name: file.name,
+					size: file.size,
+					mimeType: file.type || 'application/octet-stream',
+					editable: false,
+					readOnlyReason: 'binary'
+				}
+			};
+			projectWorkspaceLoadErrors = removeWorkspaceFileRecord(projectWorkspaceLoadErrors, relativePath);
+			openFileTab(`file:${relativePath}`);
+			return;
+		}
+		createProjectWorkspaceFile(parentPath, file.name, result.content ?? '', file);
 	}
 
 	async function downloadProjectWorkspaceFile(relativePath: string) {

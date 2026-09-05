@@ -331,7 +331,7 @@ func createProjectWorkspaceFileInternal(root *os.Root, protected map[string]bool
 	if err := ensureWritableProjectRelPathInternal(protected, rel); err != nil {
 		return err
 	}
-	if err := workspacepkg.ValidateTextContent(content, maxFileSizeBytes); err != nil {
+	if err := workspacepkg.ValidateContentSize(content, maxFileSizeBytes); err != nil {
 		return err
 	}
 	if err := ensureProjectPathHasNoSymlinkInternal(root, path.Dir(rel)); err != nil {
@@ -384,7 +384,7 @@ func updateProjectWorkspaceFileInternal(root *os.Root, protected map[string]bool
 	if err := ensureWritableProjectRelPathInternal(protected, rel); err != nil {
 		return err
 	}
-	if err := workspacepkg.ValidateTextContent(content, maxFileSizeBytes); err != nil {
+	if err := workspacepkg.ValidateContentSize(content, maxFileSizeBytes); err != nil {
 		return err
 	}
 	if err := ensureProjectPathHasNoSymlinkInternal(root, rel); err != nil {

@@ -77,23 +77,28 @@ func TestReadWorkspaceUploadsInternal(t *testing.T) {
 	require.Equal(t, []byte("two"), uploads[1])
 }
 
-func TestReadWorkspaceUploadsInternalRejectsInvalidTextAndConfiguredLimit(t *testing.T) {
+func TestReadWorkspaceUploadsInternalAcceptsAnyContentAndEnforcesLimit(t *testing.T) {
 	tests := []struct {
 		name     string
 		content  []byte
 		maxBytes int64
 		status   int
 	}{
-		{name: "invalid UTF-8", content: []byte{0xff}, maxBytes: 16, status: http.StatusBadRequest},
-		{name: "NUL byte", content: []byte{'a', 0, 'b'}, maxBytes: 16, status: http.StatusBadRequest},
+		{name: "invalid UTF-8", content: []byte{0xff}, maxBytes: 16},
+		{name: "NUL byte", content: []byte{'a', 0, 'b'}, maxBytes: 16},
 		{name: "configured size", content: []byte("four"), maxBytes: 3, status: http.StatusRequestEntityTooLarge},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			form := workspaceMultipartFormInternal(t, nil, []workspaceUploadFixtureInternal{{name: "upload.txt", content: tt.content}})
-			_, err := ReadWorkspaceUploads(form, tt.maxBytes)
-			requireWorkspaceHTTPStatusInternal(t, err, tt.status)
+			form := workspaceMultipartFormInternal(t, nil, []workspaceUploadFixtureInternal{{name: "upload.bin", content: tt.content}})
+			uploads, err := ReadWorkspaceUploads(form, tt.maxBytes)
+			if tt.status != 0 {
+				requireWorkspaceHTTPStatusInternal(t, err, tt.status)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.content, uploads[0])
 		})
 	}
 }

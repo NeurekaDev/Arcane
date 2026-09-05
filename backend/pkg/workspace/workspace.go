@@ -37,21 +37,17 @@ func ValidateUpdateManifest(fileTreeRevision string, fileChangeCount, maxFileCha
 	return nil
 }
 
-func ValidateTextContent(content []byte, maxBytes int64) error {
+// ValidateContentSize enforces the per-file workspace upload limit. Content
+// may be any bytes: text and binary files are both allowed.
+func ValidateContentSize(content []byte, maxBytes int64) error {
 	if int64(len(content)) > maxBytes {
 		return errors.Errorf("file exceeds %d MiB limit", maxBytes/(1024*1024))
-	}
-	if !utf8.Valid(content) {
-		return errors.New("file must contain valid UTF-8 text")
-	}
-	if bytes.IndexByte(content, 0) >= 0 {
-		return errors.New("file must not contain NUL bytes")
 	}
 	return nil
 }
 
 func IsTextContent(content []byte) bool {
-	return ValidateTextContent(content, int64(len(content))) == nil
+	return utf8.Valid(content) && bytes.IndexByte(content, 0) < 0
 }
 
 func ValidateUploadIndices(changes []UploadReference, uploadCount int, createFileOperation, updateFileOperation string) error {

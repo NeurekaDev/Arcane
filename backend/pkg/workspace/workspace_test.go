@@ -14,12 +14,12 @@ func TestEffectiveMaxFileSizeMB(t *testing.T) {
 	require.Equal(t, int64(24*1024*1024), MaxFileSizeBytes(24))
 }
 
-func TestValidateTextContent(t *testing.T) {
+func TestValidateContentSize(t *testing.T) {
 	limit := int64(4)
-	require.NoError(t, ValidateTextContent([]byte("text"), limit))
-	require.ErrorContains(t, ValidateTextContent([]byte("large"), limit), "file exceeds")
-	require.ErrorContains(t, ValidateTextContent([]byte{0xff}, limit), "UTF-8")
-	require.ErrorContains(t, ValidateTextContent([]byte{'a', 0}, limit), "NUL")
+	require.NoError(t, ValidateContentSize([]byte("text"), limit))
+	// Any bytes are allowed: binary content is valid as long as it fits.
+	require.NoError(t, ValidateContentSize([]byte{0xff, 0, 0x1f}, limit))
+	require.ErrorContains(t, ValidateContentSize([]byte("large"), limit), "file exceeds")
 }
 
 func TestIsTextContent(t *testing.T) {
@@ -28,9 +28,9 @@ func TestIsTextContent(t *testing.T) {
 	require.False(t, IsTextContent([]byte("hello\x00world")))
 }
 
-func TestValidateTextContentUsesDynamicMiBLimit(t *testing.T) {
+func TestValidateContentSizeUsesDynamicMiBLimit(t *testing.T) {
 	limit := int64(2 * 1024 * 1024)
-	err := ValidateTextContent([]byte(strings.Repeat("a", int(limit+1))), limit)
+	err := ValidateContentSize([]byte(strings.Repeat("a", int(limit+1))), limit)
 	require.ErrorContains(t, err, "2 MiB")
 }
 

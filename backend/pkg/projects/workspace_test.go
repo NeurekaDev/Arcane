@@ -120,15 +120,6 @@ func TestApplyWorkspaceFileChanges_RejectsUnsafePathsAndProtectedFiles(t *testin
 			},
 			upload: []byte("bad\n"),
 		},
-		{
-			name: "binary content",
-			change: project.WorkspaceFileChange{
-				Operation:    "create_file",
-				RelativePath: "binary.txt",
-				UploadIndex:  new(0),
-			},
-			upload: []byte{0},
-		},
 	}
 
 	for _, tc := range testCases {
@@ -141,6 +132,23 @@ func TestApplyWorkspaceFileChanges_RejectsUnsafePathsAndProtectedFiles(t *testin
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestApplyWorkspaceFileChanges_CreatesBinaryFileVerbatim(t *testing.T) {
+	t.Parallel()
+
+	projectDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "compose.yaml"), []byte("services: {}\n"), 0o644))
+
+	binary := []byte{0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0xde, 0xad, 0xbe, 0xef}
+	err := ApplyProjectWorkspaceChanges(projectDir, []project.WorkspaceFileChange{
+		{Operation: "create_file", RelativePath: "db.sqlite", UploadIndex: new(0)},
+	}, map[int][]byte{0: binary}, ProjectWorkspaceApplyOptions{ComposeFileName: "compose.yaml"})
+	require.NoError(t, err)
+
+	stored, err := os.ReadFile(filepath.Join(projectDir, "db.sqlite"))
+	require.NoError(t, err)
+	require.Equal(t, binary, stored)
 }
 
 func TestApplyWorkspaceFileChanges_WrapsForbiddenSentinelErrors(t *testing.T) {

@@ -34,7 +34,12 @@
 		planProjectWorkspaceFileRename,
 		validateProjectWorkspaceFileName
 	} from '../components/project-workspace-utils';
-	import { planWorkspaceFileMove, workspaceFileBasename, workspaceFileLanguage } from '#lib/utils/workspace-files';
+	import {
+		planWorkspaceFileMove,
+		workspaceFileBasename,
+		workspaceFileLanguage,
+		workspaceReadOnlyMessage
+	} from '#lib/utils/workspace-files';
 	import { WorkspaceDraftState } from '#lib/components/workspace-editor/workspace-draft-state.svelte';
 	import {
 		composeTreeSplitProps,
@@ -421,23 +426,31 @@
 												/>
 											{:else if activeProjectTab.startsWith('file:')}
 												{@const relativePath = activeProjectTab.slice(5)}
-												<CodePanel
-													variant="plain"
-													open={true}
-													title={relativePath}
-													language={workspaceFileLanguage(relativePath)}
-													validationMode="none"
-													bind:value={workspaceDraft.contents[relativePath]}
-													bind:hasErrors={workspaceDraft.hasErrors[relativePath]}
-													bind:validationReady={workspaceDraft.validationReady[relativePath]}
-													fileId={`projects:new:file:${relativePath}`}
-													originalValue=""
-													enableDiff={true}
-													editorContext={codeEditorContext}
-													bind:outlineOpen={treeOutlineOpen}
-													bind:diffOpen={treeDiffOpen}
-													bind:commandPaletteOpen={treeCommandPaletteOpen}
-												/>
+												{#if workspaceDraft.binaryFiles[relativePath]}
+													<div
+														class="flex h-full min-h-0 items-center justify-center px-4 text-center text-sm text-muted-foreground"
+													>
+														{workspaceReadOnlyMessage('binary', projectWorkspaceMaxFileSizeMb)}
+													</div>
+												{:else}
+													<CodePanel
+														variant="plain"
+														open={true}
+														title={relativePath}
+														language={workspaceFileLanguage(relativePath)}
+														validationMode="none"
+														bind:value={workspaceDraft.contents[relativePath]}
+														bind:hasErrors={workspaceDraft.hasErrors[relativePath]}
+														bind:validationReady={workspaceDraft.validationReady[relativePath]}
+														fileId={`projects:new:file:${relativePath}`}
+														originalValue=""
+														enableDiff={true}
+														editorContext={codeEditorContext}
+														bind:outlineOpen={treeOutlineOpen}
+														bind:diffOpen={treeDiffOpen}
+														bind:commandPaletteOpen={treeCommandPaletteOpen}
+													/>
+												{/if}
 											{/if}
 										{/key}
 									</div>

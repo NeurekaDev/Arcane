@@ -69,7 +69,7 @@ class ProjectService extends BaseAPIService {
 		const fileChanges = workspaceFiles.map((file) => {
 			if (file.isDirectory) return { operation: 'create_folder' as const, relativePath: file.relativePath };
 			const uploadIndex = uploads.length;
-			uploads.push(new File([file.content ?? ''], file.relativePath));
+			uploads.push(file.file ?? new File([file.content ?? ''], file.relativePath));
 			return { operation: 'create_file' as const, relativePath: file.relativePath, uploadIndex };
 		});
 		form.append(
