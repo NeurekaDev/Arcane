@@ -27,7 +27,8 @@ export function buildWorkspaceMultipartUpdate<T extends WorkspaceDisplayFileChan
 	draftChanges: T[],
 	fileContents: Record<string, string>,
 	loadedFileContents: Record<string, string>,
-	stagedFiles: Record<string, File> = {}
+	stagedFiles: Record<string, File> = {},
+	stagedUploadedText: Record<string, string> = {}
 ): { fileChanges: T[]; files: File[] } {
 	const fileChanges = draftChanges.map(
 		({ uploadIndex: _uploadIndex, baselineIndex: _baselineIndex, ...change }) => ({ ...change }) as T
@@ -43,19 +44,30 @@ export function buildWorkspaceMultipartUpdate<T extends WorkspaceDisplayFileChan
 	};
 
 	// Stage the picked file verbatim while its content is untouched, so any
-	// file — including binary — is stored byte-for-byte as uploaded.
-	const stageStagedFile = (change: T) => {
+	// file — including binary — is stored byte-for-byte as uploaded. Text
+	// uploads are compared against their own decoded bytes; a staged binary
+	// replacement is always authoritative.
+	const stageStagedFile = (change: T): boolean => {
 		const staged = stagedFiles[change.relativePath];
 		if (!staged) return false;
-		const current = fileContents[change.relativePath];
-		if (current !== undefined && current !== loadedFileContents[change.relativePath]) return false;
+		const uploaded = stagedUploadedText[change.relativePath];
+		if (uploaded !== undefined) {
+			const current = fileContents[change.relativePath];
+			if (current !== undefined && current !== uploaded) return false;
+		}
 		change.uploadIndex = files.length;
 		files.push(staged);
 		return true;
 	};
 
 	for (const change of fileChanges) {
-		if (change.operation === 'create_file' && !stageStagedFile(change)) {
+		if ((change.operation === 'create_file' || change.operation === 'update_file') && change.uploadIndex === undefined) {
+			stageStagedFile(change);
+		}
+	}
+
+	for (const change of fileChanges) {
+		if (change.operation === 'create_file' && change.uploadIndex === undefined) {
 			stageText(change, fileContents[change.relativePath] ?? '');
 		}
 	}

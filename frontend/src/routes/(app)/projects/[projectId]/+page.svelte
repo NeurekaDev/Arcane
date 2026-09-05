@@ -120,6 +120,7 @@
 	let projectWorkspaceLoading = $state<Record<string, boolean>>({});
 	let projectWorkspaceFileMetadata = $state<Record<string, ProjectWorkspaceFileContent>>({});
 	let projectWorkspaceStagedFiles = $state<Record<string, File>>({});
+	let projectWorkspaceStagedUploadedText = $state<Record<string, string>>({});
 	let projectWorkspaceFilePromises: Record<string, Promise<IncludeFile | ProjectWorkspaceFileContent> | undefined> = {};
 	const globalVariableMap = $derived(globalVariablesToMap(data.globalVariables));
 	const projectWorkspaceMaxFileSizeMb = $derived($settingsStore?.projectWorkspaceMaxFileSizeMb ?? 10);
@@ -745,7 +746,8 @@
 			projectWorkspaceChanges,
 			{ ...projectWorkspaceContents, ...includeFilesState },
 			{ ...loadedProjectWorkspaceContents, ...loadedIncludeFileContents },
-			projectWorkspaceStagedFiles
+			projectWorkspaceStagedFiles,
+			projectWorkspaceStagedUploadedText
 		);
 		let workspaceCommitted = false;
 		isLoading.saving = true;
@@ -775,6 +777,7 @@
 				};
 				projectWorkspaceChanges = [];
 				projectWorkspaceStagedFiles = {};
+				projectWorkspaceStagedUploadedText = {};
 			}
 
 			const updatedProject = await projectService.updateProject(
@@ -1152,6 +1155,7 @@
 		projectWorkspaceLoading = remapWorkspaceFileRecord(projectWorkspaceLoading, oldPath, newPath);
 		projectWorkspaceFileMetadata = remapWorkspaceFileRecord(projectWorkspaceFileMetadata, oldPath, newPath);
 		projectWorkspaceStagedFiles = remapWorkspaceFileRecord(projectWorkspaceStagedFiles, oldPath, newPath);
+		projectWorkspaceStagedUploadedText = remapWorkspaceFileRecord(projectWorkspaceStagedUploadedText, oldPath, newPath);
 		includeFilesState = remapWorkspaceFileRecord(includeFilesState, oldPath, newPath);
 		loadedIncludeFileContents = remapWorkspaceFileRecord(loadedIncludeFileContents, oldPath, newPath);
 		includeFilesPanelStates = remapWorkspaceFileRecord(includeFilesPanelStates, oldPath, newPath);
@@ -1173,6 +1177,7 @@
 		projectWorkspaceLoading = removeWorkspaceFileRecord(projectWorkspaceLoading, relativePath);
 		projectWorkspaceFileMetadata = removeWorkspaceFileRecord(projectWorkspaceFileMetadata, relativePath);
 		projectWorkspaceStagedFiles = removeWorkspaceFileRecord(projectWorkspaceStagedFiles, relativePath);
+		projectWorkspaceStagedUploadedText = removeWorkspaceFileRecord(projectWorkspaceStagedUploadedText, relativePath);
 		includeFilesState = removeWorkspaceFileRecord(includeFilesState, relativePath);
 		loadedIncludeFileContents = removeWorkspaceFileRecord(loadedIncludeFileContents, relativePath);
 		includeFilesPanelStates = removeWorkspaceFileRecord(includeFilesPanelStates, relativePath);
@@ -1192,6 +1197,7 @@
 		loadedProjectWorkspaceContents = { ...loadedProjectWorkspaceContents, [relativePath]: content };
 		if (stagedFile) {
 			projectWorkspaceStagedFiles = { ...projectWorkspaceStagedFiles, [relativePath]: stagedFile };
+			projectWorkspaceStagedUploadedText = { ...projectWorkspaceStagedUploadedText, [relativePath]: content };
 		}
 		projectWorkspaceFileMetadata = {
 			...projectWorkspaceFileMetadata,
