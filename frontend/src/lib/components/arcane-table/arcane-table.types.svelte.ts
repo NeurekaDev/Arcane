@@ -1,5 +1,5 @@
 import type { ColumnFiltersState, ColumnVisibilityState, RowData } from '@tanstack/table-core';
-import type { ArcaneColumn, ArcaneFilterFn, ArcaneRow, ArcaneSvelteTable } from './table-features';
+import type { ArcaneColumn, ArcaneFilterFn, ArcaneRow } from './table-features';
 import type { Snippet } from 'svelte';
 import type { Component } from 'svelte';
 
@@ -169,12 +169,4 @@ export type GroupSelectionState = 'none' | 'some' | 'all';
 export function shouldIgnoreTableRowClick(event: MouseEvent): boolean {
 	const target = event.target as HTMLElement | null;
 	return !!target?.closest('a, button, input, [role="checkbox"], [data-slot="checkbox"], [data-row-select-ignore]');
-}
-
-export function getTableRowsForItems<T extends RowData & { id?: string }>(
-	table: ArcaneSvelteTable<T>,
-	groupItems: Array<{ id: string }>
-) {
-	const groupIds = new Set(groupItems.map((item) => item.id));
-	return table.getRowModel().rows.filter((row) => groupIds.has(row.original.id ?? ''));
 }

@@ -72,6 +72,12 @@ export function createVirtualizer<TScroll extends Element, TItem extends Element
 			return totalSize;
 		},
 		/** `use:` action target that measures real row heights for accurate offsets. */
-		measureElement: (node: TItem) => instance.measureElement(node)
+		measureElement: (node: TItem | null) => instance.measureElement(node),
+		measure: () => {
+			instance.measure();
+			for (const node of instance.elementsCache.values()) {
+				if (node.isConnected) instance.measureElement(node);
+			}
+		}
 	};
 }

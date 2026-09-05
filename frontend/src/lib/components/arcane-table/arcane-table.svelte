@@ -4,6 +4,7 @@
 	import { arcaneTableFeatures, type ArcaneColumnDef, type ArcaneRow, type ArcaneTable } from './table-features';
 	import DataTableToolbar from './arcane-table-toolbar.svelte';
 	import { onMount, untrack } from 'svelte';
+	import { IsMobile } from '#lib/hooks/is-mobile.svelte';
 	import type { Paginated, SearchPaginationSortRequest } from '#lib/types/shared';
 	import type { Snippet } from 'svelte';
 	import type { ColumnSpec } from './arcane-table.types.svelte';
@@ -140,6 +141,26 @@
 	// The desktop scroll container, bound below and handed to the desktop view so it can virtualize
 	// long flat lists. The unstyled/styled branches are mutually exclusive, so one ref suffices.
 	let desktopScrollEl = $state<HTMLElement>();
+	const isMobile = new IsMobile();
+	const scrollPositions = { desktop: { top: 0, left: 0 }, mobile: { top: 0, left: 0 } };
+	const selectedIdSet = $derived(new Set(selectedIds ?? []));
+
+	function restoreScroll(node: HTMLElement, view: keyof typeof scrollPositions) {
+		const position = scrollPositions[view];
+		const frame = requestAnimationFrame(() => {
+			node.scrollTop = position.top;
+			node.scrollLeft = position.left;
+			node.addEventListener('scroll', savePosition, { passive: true });
+		});
+		function savePosition() {
+			position.top = node.scrollTop;
+			position.left = node.scrollLeft;
+		}
+		return () => {
+			cancelAnimationFrame(frame);
+			node.removeEventListener('scroll', savePosition);
+		};
+	}
 
 	function toggleRowExpanded(rowId: string) {
 		const next = new Set(expandedRows);
@@ -611,6 +632,8 @@
 		}))
 	);
 
+	const rowIndex = $derived.by(() => new Map(table.getRowModel().rows.map((row, index) => [row.original.id, { row, index }])));
+
 	// Compute grouped rows when groupBy is provided
 	const effectiveGroupedRows = $derived.by((): GroupedData<TData>[] | null => {
 		if (groupedRows) return groupedRows;
@@ -634,8 +657,7 @@
 	// Get selection state for a group
 	function getGroupSelectionState(groupItems: TData[]): GroupSelectionState {
 		const groupIds = groupItems.map((item) => item.id);
-		const selectedSet = new Set(selectedIds ?? []);
-		const selectedCount = groupIds.filter((id) => selectedSet.has(id)).length;
+		const selectedCount = groupIds.filter((id) => selectedIdSet.has(id)).length;
 
 		if (selectedCount === 0) return 'none';
 		if (selectedCount === groupIds.length) return 'all';
@@ -749,6 +771,7 @@
 
 {#snippet MobileViewSnippet()}
 	<ArcaneTableMobileView
+		{rowIndex}
 		{table}
 		{mobileCard}
 		{mobileFieldVisibility}
@@ -785,41 +808,49 @@
 			</div>
 		{/if}
 
-		<div
-			bind:this={desktopScrollEl}
-			class="[isolation:isolate] hidden h-full min-h-0 flex-1 overflow-auto bg-background md:block"
-		>
-			<ArcaneTableDesktopView
-				{table}
-				{selectedIds}
-				columnsCount={effectiveColumnsCount}
-				groupedRows={effectiveGroupedRows}
-				{groupIcon}
-				{groupCollapsedState}
-				{selectionDisabled}
-				onGroupToggle={handleGroupToggle}
-				{getGroupSelectionState}
-				{onToggleGroupSelection}
-				onToggleRowSelection={(id, selected) => onToggleRow(selected, id)}
-				{unstyled}
-				{expandedRowContent}
-				{expandedRows}
-				onToggleRowExpanded={toggleRowExpanded}
-				scrollElement={desktopScrollEl}
-				{loading}
-				{wrapText}
-			/>
-		</div>
-
-		<div class="[isolation:isolate] block flex-1 overflow-auto bg-background/80 md:hidden">
-			{#if unstyled}
-				<div class="divide-y divide-border/40">
+		{#if !isMobile.current}
+			<div
+				{@attach (node) => restoreScroll(node, 'desktop')}
+				bind:this={desktopScrollEl}
+				class="[isolation:isolate] h-full min-h-0 flex-1 overflow-auto bg-background"
+			>
+				<ArcaneTableDesktopView
+					{rowIndex}
+					{table}
+					{selectedIdSet}
+					initialScrollTop={scrollPositions.desktop.top}
+					columnsCount={effectiveColumnsCount}
+					groupedRows={effectiveGroupedRows}
+					{groupIcon}
+					{groupCollapsedState}
+					{selectionDisabled}
+					onGroupToggle={handleGroupToggle}
+					{getGroupSelectionState}
+					{onToggleGroupSelection}
+					onToggleRowSelection={(id, selected) => onToggleRow(selected, id)}
+					{unstyled}
+					{expandedRowContent}
+					{expandedRows}
+					onToggleRowExpanded={toggleRowExpanded}
+					scrollElement={desktopScrollEl}
+					{loading}
+					{wrapText}
+				/>
+			</div>
+		{:else}
+			<div
+				{@attach (node) => restoreScroll(node, 'mobile')}
+				class="[isolation:isolate] block flex-1 overflow-auto bg-background/80"
+			>
+				{#if unstyled}
+					<div class="divide-y divide-border/40">
+						{@render MobileViewSnippet()}
+					</div>
+				{:else}
 					{@render MobileViewSnippet()}
-				</div>
-			{:else}
-				{@render MobileViewSnippet()}
-			{/if}
-		</div>
+				{/if}
+			</div>
+		{/if}
 
 		{#if !withoutPagination}
 			<div class="shrink-0 border-t border-border/50 px-4 py-3">

@@ -6,13 +6,15 @@
 	import { m } from '#lib/paraglide/messages';
 	import { cn } from '#lib/utils';
 	import type { Snippet, Component } from 'svelte';
-	import { getTableRowsForItems, shouldIgnoreTableRowClick, type GroupedData } from './arcane-table.types.svelte';
+	import { shouldIgnoreTableRowClick, type GroupedData } from './arcane-table.types.svelte';
 	import { slide } from 'svelte/transition';
+	import { getTableRowsForItems } from './arcane-table.utils';
 
 	void slide;
 
 	let {
 		table,
+		rowIndex,
 		mobileCard,
 		mobileFieldVisibility,
 		groupedRows = null,
@@ -24,6 +26,7 @@
 		loading = false
 	}: {
 		table: ArcaneSvelteTable<TData>;
+		rowIndex: ReadonlyMap<string, { row: ArcaneRow<TData>; index: number }>;
 		mobileCard: Snippet<[{ row: ArcaneRow<TData>; item: TData; mobileFieldVisibility: Record<string, boolean> }]>;
 		mobileFieldVisibility: Record<string, boolean>;
 		groupedRows?: GroupedData<TData>[] | null;
@@ -86,7 +89,7 @@
 	{#if isGrouped && groupedRows}
 		<div class="space-y-4 py-2">
 			{#each groupedRows as group (group.groupName)}
-				{@const groupRows = getTableRowsForItems(table, group.items)}
+				{@const groupRows = getTableRowsForItems(rowIndex, group.items)}
 				{@const IconComponent = groupIcon?.(group.groupName)}
 
 				<DropdownCard

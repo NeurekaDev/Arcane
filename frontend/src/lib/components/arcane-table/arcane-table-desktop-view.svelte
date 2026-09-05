@@ -8,7 +8,6 @@
 	import { m } from '#lib/paraglide/messages';
 	import { cn } from '#lib/utils';
 	import {
-		getTableRowsForItems,
 		shouldIgnoreTableRowClick,
 		type ColumnWidth,
 		type ColumnAlign,
@@ -17,15 +16,18 @@
 	} from './arcane-table.types.svelte';
 	import TableCheckbox from './arcane-table-checkbox.svelte';
 	import TableEmpty from './table-empty.svelte';
-	import type { Component, Snippet } from 'svelte';
+	import { untrack, type Component, type Snippet } from 'svelte';
 	import type { Attachment } from 'svelte/attachments';
 	import { slide } from 'svelte/transition';
+	import { getTableRowsForItems } from './arcane-table.utils';
 
 	void slide;
 
 	let {
 		table,
-		selectedIds,
+		rowIndex,
+		selectedIdSet,
+		initialScrollTop = 0,
 		columnsCount,
 		groupedRows = null,
 		groupIcon,
@@ -44,7 +46,9 @@
 		wrapText = false
 	}: {
 		table: ArcaneSvelteTable<TData>;
-		selectedIds: string[];
+		rowIndex: ReadonlyMap<string, { row: ArcaneRow<TData>; index: number }>;
+		selectedIdSet: ReadonlySet<string>;
+		initialScrollTop?: number;
 		columnsCount: number;
 		groupedRows?: GroupedData<TData>[] | null;
 		groupIcon?: (groupName: string) => Component;
@@ -78,7 +82,6 @@
 		if (!width || width === 'auto') return '';
 		if (width === 'min') return 'w-0';
 		if (width === 'max') return 'w-full';
-		if (typeof width === 'number') return `w-[${width}px]`;
 		return '';
 	}
 
@@ -101,7 +104,7 @@
 			return;
 		}
 		if (selectionDisabled) return;
-		const isSelected = (selectedIds ?? []).includes(rowId);
+		const isSelected = selectedIdSet.has(rowId);
 		onToggleRowSelection?.(rowId, !isSelected);
 	}
 
@@ -122,29 +125,70 @@
 	// Get rows for a specific group from the table model
 	const isGrouped = $derived(groupedRows !== null && groupedRows.length > 0);
 
-	// --- Row virtualization ---------------------------------------------------------------------
-	// Only the flat (non-grouped, non-expandable) path is virtualized, and only past a threshold —
-	// the case that matters is the "All" page size (TABLE_PAGE_SIZE_ALL), where the server returns
-	// the full unpaginated set. Normal paginated pages (<= 100 rows) render plainly. Grouped and
-	// expandable layouts keep their existing, proven rendering.
+	// Keep small pages and variable-layout views on the regular table path.
 	const VIRTUALIZE_THRESHOLD = 100;
-	// Rows are strictly single-line (Table.Cell is `whitespace-nowrap`) so they all share one height.
-	// We virtualize with a fixed row height instead of measuring every row: dynamic per-row measurement
-	// made the "All" view flicker — with an estimate that differed from the real height, each row
-	// re-measured as it scrolled in and nudged the rows already on screen. Calibrate once from the first
-	// rendered row, after which every offset is exact and stable.
 	const ROW_ESTIMATE_PX = 44;
 	let measuredRowHeight = $state<number | null>(null);
+	let tableElement = $state<HTMLTableElement | null>(null);
+	let bodyElement = $state<HTMLTableSectionElement | null>(null);
+	let scrollMargin = $state(0);
 	const flatRows = $derived(table.getRowModel().rows);
 	const shouldVirtualize = $derived(
 		!isGrouped && !hasExpand && !wrapText && !!scrollElement && flatRows.length > VIRTUALIZE_THRESHOLD
 	);
+	const getItemKey = $derived.by(() => {
+		const rows = flatRows;
+		return (index: number) => rows[index]?.id ?? index;
+	});
 
-	function calibrateRowHeight(node: HTMLTableRowElement) {
-		if (measuredRowHeight !== null) return;
-		const h = node.getBoundingClientRect().height;
-		if (h > 0) measuredRowHeight = h;
+	function measureRow(node: HTMLTableRowElement) {
+		untrack(() => {
+			if (measuredRowHeight === null) {
+				const height = node.getBoundingClientRect().height;
+				if (height > 0) measuredRowHeight = height;
+			}
+			rowVirtualizer.measureElement(node);
+		});
+		return () => queueMicrotask(() => rowVirtualizer.measureElement(null));
 	}
+
+	$effect(() => {
+		const container = scrollElement;
+		const tableNode = tableElement;
+		const body = bodyElement;
+		if (!shouldVirtualize || !container || !tableNode || !body) return;
+
+		table.getVisibleLeafColumns();
+		let width = 0;
+		const remeasure = () => {
+			const row = body.querySelector<HTMLTableRowElement>('tr[data-index]');
+			const height = row?.getBoundingClientRect().height;
+			if (height) measuredRowHeight = height;
+			rowVirtualizer.measure();
+		};
+		const updateLayout = () => {
+			const nextWidth = tableNode.getBoundingClientRect().width;
+			scrollMargin =
+				body.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - container.clientTop;
+			if (nextWidth !== width) {
+				width = nextWidth;
+				remeasure();
+			}
+		};
+		const fontsChanged = () => {
+			remeasure();
+			updateLayout();
+		};
+		const observer = new ResizeObserver(updateLayout);
+		observer.observe(tableNode);
+		if (tableNode.tHead) observer.observe(tableNode.tHead);
+		document.fonts.addEventListener('loadingdone', fontsChanged);
+		untrack(updateLayout);
+		return () => {
+			observer.disconnect();
+			document.fonts.removeEventListener('loadingdone', fontsChanged);
+		};
+	});
 
 	// Row actions are a real pinned column: sticky to the row's right edge with its own reserved
 	// width, so the floating button never overlaps data columns and survives horizontal scroll.
@@ -173,7 +217,9 @@
 			getScrollElement: () => scrollElement ?? null,
 			estimateSize: () => rowSize,
 			overscan: 10,
-			getItemKey: (index) => flatRows[index]?.id ?? index,
+			getItemKey,
+			initialOffset: initialScrollTop,
+			scrollMargin,
 			enabled: shouldVirtualize
 		};
 	});
@@ -194,15 +240,21 @@
 	{/if}
 {/snippet}
 
-{#snippet dataRow(row: ArcaneRow<TData>, isGroupedRow: boolean, measureRow?: Attachment<HTMLTableRowElement>)}
+{#snippet dataRow(
+	row: ArcaneRow<TData>,
+	isGroupedRow: boolean,
+	rowMeasurement?: Attachment<HTMLTableRowElement>,
+	virtualIndex?: number
+)}
 	{@const rowId = row.original.id}
 	{@const isExpanded = expandedRows?.has(rowId) ?? false}
 	<Table.Row
-		{@attach measureRow}
-		data-state={(selectedIds ?? []).includes(rowId) && 'selected'}
+		{@attach rowMeasurement}
+		data-index={virtualIndex}
+		data-state={selectedIdSet.has(rowId) && 'selected'}
 		data-expanded={isExpanded ? true : undefined}
 		onclick={(event) => handleRowClick(event, rowId)}
-		class={cn(hasExpand && 'cursor-pointer', isExpanded && 'bg-primary/15')}
+		class={cn('isolate', hasExpand && 'cursor-pointer', isExpanded && 'bg-primary/15')}
 	>
 		{#if hasExpand}
 			<Table.Cell class="w-8 px-2" data-row-select-ignore>
@@ -221,7 +273,10 @@
 		{/if}
 		{#each row.getVisibleCells() as cell, cellIndex (cell.id)}
 			{@const isFirstDataCell = !selectionDisabled ? cellIndex === 1 : cellIndex === 0}
-			<Table.Cell class={getCellClasses(cell, isGroupedRow, isFirstDataCell)}>
+			<Table.Cell
+				style={typeof cell.column.columnDef.meta?.width === 'number' ? `width: ${cell.column.columnDef.meta.width}px` : undefined}
+				class={getCellClasses(cell, isGroupedRow, isFirstDataCell)}
+			>
 				{@render cellContent(cell)}
 			</Table.Cell>
 		{/each}
@@ -270,7 +325,7 @@
 	{#if !unstyled}
 		<div aria-hidden="true" class="sticky top-0 z-[var(--arcane-z-sticky)] -mb-10 h-10 backdrop-blur-sm"></div>
 	{/if}
-	<Table.Root class={shouldVirtualize ? 'table-fixed' : undefined}>
+	<Table.Root bind:ref={tableElement} class={shouldVirtualize ? 'table-fixed' : undefined}>
 		<Table.Header>
 			{#each table.getHeaderGroups() as headerGroup (headerGroup.id)}
 				<Table.Row>
@@ -280,7 +335,11 @@
 					{#each headerGroup.headers as header (header.id)}
 						<Table.Head
 							colspan={header.colSpan}
+							style={typeof header.column.columnDef.meta?.width === 'number'
+								? `width: ${header.column.columnDef.meta.width}px`
+								: undefined}
 							class={cn(
+								getWidthClass(header.column.columnDef.meta?.width),
 								header.column.id === 'select' && selectCellClasses,
 								header.column.id === 'actions' && cn(actionsCellClasses, 'z-[var(--arcane-z-page-floating)] bg-background')
 							)}
@@ -293,11 +352,10 @@
 				</Table.Row>
 			{/each}
 		</Table.Header>
-		<Table.Body>
+		<Table.Body bind:ref={bodyElement}>
 			{#if isGrouped && groupedRows}
 				{#each groupedRows as group (group.groupName)}
 					{@const isCollapsed = groupCollapsedState[group.groupName] ?? true}
-					{@const groupRows = getTableRowsForItems(table, group.items)}
 					{@const selectionState = getGroupSelectionState?.(group.items) ?? 'none'}
 					{@const hasSelection = selectionState !== 'none'}
 					{@const IconComponent = groupIcon?.(group.groupName)}
@@ -338,6 +396,7 @@
 
 					<!-- Group Items (if not collapsed) -->
 					{#if !isCollapsed}
+						{@const groupRows = getTableRowsForItems(rowIndex, group.items)}
 						{#each groupRows as row (row.id)}
 							{@render dataRow(row, true)}
 						{/each}
@@ -356,15 +415,15 @@
 					{@const vItems = rowVirtualizer.virtualItems}
 					{@const first = vItems[0]}
 					{@const last = vItems[vItems.length - 1]}
-					{@const padTop = first ? first.start : 0}
-					{@const padBottom = last ? rowVirtualizer.totalSize - last.end : 0}
+					{@const padTop = first ? Math.max(0, first.start - scrollMargin) : 0}
+					{@const padBottom = last ? Math.max(0, rowVirtualizer.totalSize - (last.end - scrollMargin)) : 0}
 					{#if padTop > 0}
 						<tr aria-hidden="true"><td colspan={columnsCount} class="border-0 p-0" style="height: {padTop}px"></td></tr>
 					{/if}
 					{#each vItems as vItem (vItem.key)}
 						{@const row = flatRows[vItem.index]}
 						{#if row}
-							{@render dataRow(row, false, calibrateRowHeight)}
+							{@render dataRow(row, false, measureRow, vItem.index)}
 						{/if}
 					{/each}
 					{#if padBottom > 0}

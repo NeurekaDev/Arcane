@@ -1,3 +1,5 @@
+import type { ArcaneRow } from './table-features';
+import type { RowData } from '@tanstack/table-core';
 import type { ColumnFiltersState } from '@tanstack/table-core';
 import type { FilterMap, FilterValue } from '#lib/types/shared';
 import type { CompactTablePrefs } from './arcane-table.types.svelte';
@@ -98,4 +100,18 @@ export function extractPersistedPreferences(
 		mobileVisibility: prefs.m,
 		customSettings: prefs.c
 	};
+}
+
+export function getTableRowsForItems<T extends RowData>(
+	rowIndex: ReadonlyMap<string, { row: ArcaneRow<T>; index: number }>,
+	groupItems: Array<{ id: string }>
+): ArcaneRow<T>[] {
+	const ids = new Set(groupItems.map((item) => item.id));
+	return Array.from(ids)
+		.flatMap((id) => {
+			const entry = rowIndex.get(id);
+			return entry ? [entry] : [];
+		})
+		.sort((a, b) => a.index - b.index)
+		.map((entry) => entry.row);
 }
