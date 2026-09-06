@@ -106,7 +106,6 @@ jobs:
           SKIP_RELEASE: 'true'
           SKIP_CHANGELOG: 'true'
           NEXT_IMAGE_VERSION: ${{ steps.next-version.outputs.version }}
-          GORELEASER_CURRENT_TAG: ${{ steps.next-version.outputs.image_tag }}
           GORELEASER_PREVIOUS_TAG: ${{ steps.next-version.outputs.previous_tag }}
           NODE_VERSION: ${{ steps.frontend-versions.outputs.node_version }}
           SVELTEKIT_VERSION: ${{ steps.frontend-versions.outputs.sveltekit_version }}

@@ -102,29 +102,9 @@ func (m *KeySetManager) KeySet(ctx context.Context, client *http.Client, jwksURL
 		}
 		m.mu.Unlock()
 
-		registerCtx, cancel := context.WithTimeout(ctx, initialReadyTimeout)
-		defer cancel()
-		if registerErr := managed.cache.Register(registerCtx, jwksURL,
-			jwkfetch.WithWaitReady(true),
-			jwkfetch.WithMinInterval(minimumRefreshInterval),
-			jwkfetch.WithMaxInterval(maximumRefreshInterval),
-		); registerErr != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			if managed.cache.IsRegistered(cleanupCtx, jwksURL) {
-				_ = managed.cache.Unregister(cleanupCtx, jwksURL)
-			}
-			return nil, errors.WrapIf(registerErr, "failed to register JWKS URL")
-		}
-
-		set, setErr := managed.cache.CachedSet(jwksURL)
-		if setErr != nil {
-			return nil, errors.WrapIf(setErr, "failed to create cached JWK set")
-		}
-		keySet := &keySet{
-			cache:   managed.cache,
-			jwksURL: jwksURL,
-			set:     set,
+		keySet, initErr := managed.initializeKeySetInternal(ctx, jwksURL)
+		if initErr != nil {
+			return nil, initErr
 		}
 
 		m.mu.Lock()
@@ -142,6 +122,45 @@ func (m *KeySetManager) KeySet(ctx context.Context, client *http.Client, jwksURL
 	if !ok || keySet == nil {
 		return nil, errors.New("oidcjwk: invalid key set")
 	}
+	return keySet, nil
+}
+
+func (m *managedCache) initializeKeySetInternal(ctx context.Context, jwksURL string) (*keySet, error) {
+	registerCtx, cancel := context.WithTimeout(ctx, initialReadyTimeout)
+	defer cancel()
+	initialized := false
+	defer func() {
+		if initialized {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if m.cache.IsRegistered(cleanupCtx, jwksURL) {
+			_ = m.cache.Unregister(cleanupCtx, jwksURL)
+		}
+	}()
+	if registerErr := m.cache.Register(registerCtx, jwksURL,
+		jwkfetch.WithWaitReady(false),
+		jwkfetch.WithMinInterval(minimumRefreshInterval),
+		jwkfetch.WithMaxInterval(maximumRefreshInterval),
+	); registerErr != nil {
+		return nil, errors.WrapIf(registerErr, "failed to register JWKS URL")
+	}
+	// Refresh returns fetch and parse errors that the background readiness wait hides.
+	if _, refreshErr := m.cache.Refresh(registerCtx, jwksURL); refreshErr != nil {
+		return nil, &initializationError{cause: refreshErr}
+	}
+
+	set, setErr := m.cache.CachedSet(jwksURL)
+	if setErr != nil {
+		return nil, errors.WrapIf(setErr, "failed to create cached JWK set")
+	}
+	keySet := &keySet{
+		cache:   m.cache,
+		jwksURL: jwksURL,
+		set:     set,
+	}
+	initialized = true
 	return keySet, nil
 }
 
