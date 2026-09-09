@@ -471,9 +471,47 @@ const (
 	localVolumeRepositoryID    = "volumes:local"
 )
 
-func (s *VolumeService) rusticPasswordInternal() string {
+func (s *VolumeService) legacyVolumePasswordInternal() string {
 	sum := sha256.Sum256([]byte("arcane-volume-backups:" + s.encryptionKey))
 	return hex.EncodeToString(sum[:])
+}
+
+// volumeBackupPasswordInternal returns the Rustic password for volume backup
+// repositories: the recovery key once one is stored, otherwise the legacy
+// instance-key derivation that predates recovery-key volume backups.
+func (s *VolumeService) volumeBackupPasswordInternal(ctx context.Context) (string, error) {
+	if s.recoveryKeys == nil {
+		return s.legacyVolumePasswordInternal(), nil
+	}
+	key, err := s.recoveryKeys.Get(ctx)
+	if errors.Is(err, backup.ErrRecoveryKeyNotConfigured) {
+		return s.legacyVolumePasswordInternal(), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	s.ensureRepositoriesRekeyedInternal(ctx, key)
+	return key, nil
+}
+
+// ensureRepositoriesRekeyedInternal runs the one-time legacy-to-recovery-key
+// migration once per process for a given key. A failed attempt is retried on
+// the next password resolution so a transient backend outage cannot leave
+// repositories unopenable until restart.
+func (s *VolumeService) ensureRepositoriesRekeyedInternal(ctx context.Context, key string) {
+	s.rekeyMu.Lock()
+	attempted := s.rekeyAttemptedKey == key
+	s.rekeyAttemptedKey = key
+	s.rekeyMu.Unlock()
+	if attempted {
+		return
+	}
+	if err := s.MigrateRepositoryPasswords(ctx); err != nil {
+		s.rekeyMu.Lock()
+		s.rekeyAttemptedKey = ""
+		s.rekeyMu.Unlock()
+		slog.WarnContext(ctx, "failed to re-key volume backup repositories to the recovery key", "error", err.Error())
+	}
 }
 
 func (s *VolumeService) localRusticRepositoryInternal(ctx context.Context, dockerClient *client.Client, readOnly bool) (backup.Repository, error) {
@@ -489,6 +527,17 @@ func (s *VolumeService) localRusticRepositoryInternal(ctx context.Context, docke
 }
 
 func (s *VolumeService) remoteRusticRepositoryInternal(ctx context.Context, destinationID string) (backup.Repository, error) {
+	instanceID := strings.TrimSpace(s.settingsService.GetSettingsConfig().InstanceID.Value)
+	if instanceID == "" {
+		return backup.Repository{}, errors.New("arcane instance ID is unavailable")
+	}
+	return s.remoteRusticRepositoryForInstanceInternal(ctx, destinationID, instanceID)
+}
+
+// remoteRusticRepositoryForInstanceInternal addresses the volume repository
+// root of a specific Arcane instance. Discovered backups reference the root
+// they were found in, so restores and deletes must target that instance.
+func (s *VolumeService) remoteRusticRepositoryForInstanceInternal(ctx context.Context, destinationID, instanceID string) (backup.Repository, error) {
 	if s.s3Destinations == nil {
 		return backup.Repository{}, errors.New("S3 backup service is unavailable")
 	}
@@ -496,12 +545,8 @@ func (s *VolumeService) remoteRusticRepositoryInternal(ctx context.Context, dest
 	if err != nil {
 		return backup.Repository{}, errors.New("the selected S3 backup destination is not configured")
 	}
-	instanceID := strings.TrimSpace(s.settingsService.GetSettingsConfig().InstanceID.Value)
-	if instanceID == "" {
-		return backup.Repository{}, errors.New("arcane instance ID is unavailable")
-	}
 	return backup.Repository{
-		ID:          "volumes:s3:" + destinationID,
+		ID:          "volumes:s3:" + destinationID + ":" + instanceID,
 		Environment: configuration.RusticEnvironment("arcane-volume-backups", instanceID),
 	}, nil
 }
@@ -512,7 +557,14 @@ func (s *VolumeService) rusticRepositoryForBackupInternal(ctx context.Context, d
 		return repository, entry.LocalSnapshotID, err
 	}
 	if entry.RemoteSnapshotID != "" {
-		repository, err := s.remoteRusticRepositoryInternal(ctx, entry.S3DestinationID)
+		instanceID := strings.TrimSpace(entry.RemoteInstanceID)
+		if instanceID == "" {
+			instanceID = strings.TrimSpace(s.settingsService.GetSettingsConfig().InstanceID.Value)
+		}
+		if instanceID == "" {
+			return backup.Repository{}, "", errors.New("arcane instance ID is unavailable")
+		}
+		repository, err := s.remoteRusticRepositoryForInstanceInternal(ctx, entry.S3DestinationID, instanceID)
 		return repository, entry.RemoteSnapshotID, err
 	}
 	return backup.Repository{}, "", errors.New("volume backup has no Rustic snapshot")
@@ -680,6 +732,10 @@ func (s *VolumeService) executeBackupInternal(ctx context.Context, entry *Volume
 	if err != nil {
 		return err
 	}
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return err
+	}
 	var stopped []container.Summary
 	containersStopped := false
 	if plan.policy != nil && plan.policy.StopContainers {
@@ -703,7 +759,7 @@ func (s *VolumeService) executeBackupInternal(ctx context.Context, entry *Volume
 		if repoErr != nil {
 			return repoErr
 		}
-		localSnapshot, err = s.engine.CreateSnapshot(ctx, dockerClient, repository, s.rusticPasswordInternal(), volumeName, volumeSourceMountInternal(volumeName))
+		localSnapshot, err = s.engine.CreateSnapshot(ctx, dockerClient, repository, password, volumeName, volumeSourceMountInternal(volumeName))
 		if err != nil {
 			return fmt.Errorf("failed to create local Rustic snapshot: %w", err)
 		}
@@ -721,9 +777,9 @@ func (s *VolumeService) executeBackupInternal(ctx context.Context, entry *Volume
 			if localErr != nil {
 				return localErr
 			}
-			remoteSnapshot, err = s.engine.Replicate(ctx, dockerClient, localRepository, localSnapshot.ID, remoteRepository, s.rusticPasswordInternal(), volumeName)
+			remoteSnapshot, err = s.engine.Replicate(ctx, dockerClient, localRepository, localSnapshot.ID, remoteRepository, password, volumeName)
 		} else {
-			remoteSnapshot, err = s.engine.CreateSnapshot(ctx, dockerClient, remoteRepository, s.rusticPasswordInternal(), volumeName, volumeSourceMountInternal(volumeName))
+			remoteSnapshot, err = s.engine.CreateSnapshot(ctx, dockerClient, remoteRepository, password, volumeName, volumeSourceMountInternal(volumeName))
 		}
 		if err != nil {
 			return fmt.Errorf("failed to create S3 Rustic snapshot: %w", err)
@@ -809,7 +865,11 @@ func (s *VolumeService) UploadBackup(ctx context.Context, backupID, s3Destinatio
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := s.engine.Replicate(ctx, dockerClient, localRepository, entry.LocalSnapshotID, remoteRepository, s.rusticPasswordInternal(), entry.VolumeName)
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := s.engine.Replicate(ctx, dockerClient, localRepository, entry.LocalSnapshotID, remoteRepository, password, entry.VolumeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload Rustic snapshot to S3: %w", err)
 	}
@@ -865,12 +925,15 @@ func (s *VolumeService) deleteRusticBackupsInternal(ctx context.Context, entries
 			localEntries = append(localEntries, entry)
 		}
 		if includeRemote && entry.RemoteSnapshotID != "" {
-			remoteGroups[entry.S3DestinationID] = append(remoteGroups[entry.S3DestinationID], entry)
+			// Discovered backups can reference another instance's repository
+			// root, so forgets group by destination and root.
+			remoteGroups[entry.S3DestinationID+"\x00"+entry.RemoteInstanceID] = append(remoteGroups[entry.S3DestinationID+"\x00"+entry.RemoteInstanceID], entry)
 		}
 	}
 	deleteErr := s.forgetLocalSnapshotsInternal(ctx, dockerClient, localEntries)
-	for destinationID, group := range remoteGroups {
-		deleteErr = errors.Combine(deleteErr, s.forgetRemoteSnapshotsInternal(ctx, dockerClient, destinationID, group))
+	for repositoryKey, group := range remoteGroups {
+		destinationID, instanceID, _ := strings.Cut(repositoryKey, "\x00")
+		deleteErr = errors.Combine(deleteErr, s.forgetRemoteSnapshotsInternal(ctx, dockerClient, destinationID, instanceID, group))
 	}
 	for _, entry := range entries {
 		if entry.LocalSnapshotID == "" && entry.RemoteSnapshotID == "" {
@@ -904,9 +967,13 @@ func (s *VolumeService) forgetLocalSnapshotsInternal(ctx context.Context, docker
 	for index, entry := range entries {
 		snapshotIDs[index] = entry.LocalSnapshotID
 	}
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to delete local Rustic snapshots: %w", err)
+	}
 	repository, repoErr := s.localRusticRepositoryInternal(ctx, dockerClient, false)
 	if repoErr == nil {
-		repoErr = s.engine.ForgetSnapshots(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotIDs)
+		repoErr = s.engine.ForgetSnapshots(ctx, dockerClient, repository, password, snapshotIDs)
 	}
 	if repoErr != nil {
 		return fmt.Errorf("failed to delete local Rustic snapshots: %w", repoErr)
@@ -917,14 +984,18 @@ func (s *VolumeService) forgetLocalSnapshotsInternal(ctx context.Context, docker
 	return nil
 }
 
-func (s *VolumeService) forgetRemoteSnapshotsInternal(ctx context.Context, dockerClient *client.Client, destinationID string, entries []*VolumeBackup) error {
+func (s *VolumeService) forgetRemoteSnapshotsInternal(ctx context.Context, dockerClient *client.Client, destinationID, instanceID string, entries []*VolumeBackup) error {
 	snapshotIDs := make([]string, len(entries))
 	for index, entry := range entries {
 		snapshotIDs[index] = entry.RemoteSnapshotID
 	}
-	repository, repoErr := s.remoteRusticRepositoryInternal(ctx, destinationID)
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to delete S3 Rustic snapshots: %w", err)
+	}
+	repository, repoErr := s.remoteRusticRepositoryForInstanceInternal(ctx, destinationID, instanceID)
 	if repoErr == nil {
-		repoErr = s.engine.ForgetSnapshots(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotIDs)
+		repoErr = s.engine.ForgetSnapshots(ctx, dockerClient, repository, password, snapshotIDs)
 	}
 	if repoErr != nil {
 		return fmt.Errorf("failed to delete S3 Rustic snapshots: %w", repoErr)
@@ -964,6 +1035,10 @@ func (s *VolumeService) RestoreBackup(ctx context.Context, volumeName, backupID 
 	if err != nil {
 		return err
 	}
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return err
+	}
 	var repository backup.Repository
 	var snapshotID string
 	if entry.Format != VolumeBackupFormatArchive {
@@ -983,15 +1058,28 @@ func (s *VolumeService) RestoreBackup(ctx context.Context, volumeName, backupID 
 	if err != nil {
 		return err
 	}
-	preBackup, err := s.CreateBackup(ctx, volumeName, user, VolumeBackupTriggerSafety, volumetypes.CreateBackupRequest{Destination: volumetypes.BackupDestinationLocal})
-	if err != nil {
-		return fmt.Errorf("failed to create pre-restore backup: %w", err)
+	// A discovered backup can target a volume this instance has never seen
+	// (fresh-instance recovery). Create it and skip the safety pre-restore
+	// backup, since an empty volume has nothing to protect yet.
+	var preBackup *VolumeBackup
+	var createdVolume bool
+	if _, inspectErr := dockerClient.VolumeInspect(ctx, volumeName, client.VolumeInspectOptions{}); inspectErr != nil {
+		if _, createErr := dockerClient.VolumeCreate(ctx, client.VolumeCreateOptions{Name: volumeName}); createErr != nil {
+			return fmt.Errorf("failed to create missing volume for restore: %w", createErr)
+		}
+		createdVolume = true
+		slog.InfoContext(ctx, "Created missing volume for restore", "volume", volumeName)
+	} else {
+		preBackup, err = s.CreateBackup(ctx, volumeName, user, VolumeBackupTriggerSafety, volumetypes.CreateBackupRequest{Destination: volumetypes.BackupDestinationLocal})
+		if err != nil {
+			return fmt.Errorf("failed to create pre-restore backup: %w", err)
+		}
 	}
 	if entry.Format == VolumeBackupFormatArchive {
 		if err := s.restoreArchiveBackupInternal(ctx, dockerClient, volumeName, backupID); err != nil {
 			return err
 		}
-	} else if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotID, mount.Mount{Type: mount.TypeVolume, Source: volumeName, Target: "/volume"}, backup.RestoreOptions{DeleteExtra: true}); err != nil {
+	} else if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, password, snapshotID, mount.Mount{Type: mount.TypeVolume, Source: volumeName, Target: "/volume"}, backup.RestoreOptions{DeleteExtra: true}); err != nil {
 		return fmt.Errorf("failed to restore Rustic snapshot: %w", err)
 	}
 	if containersStopped {
@@ -1001,7 +1089,10 @@ func (s *VolumeService) RestoreBackup(ctx context.Context, volumeName, backupID 
 			return err
 		}
 	}
-	metadata := database.JSON{"action": "backup_restore", "backup_id": backupID, "pre_restore_backupId": preBackup.ID}
+	metadata := database.JSON{"action": "backup_restore", "backup_id": backupID, "created_volume": createdVolume}
+	if preBackup != nil {
+		metadata["pre_restore_backupId"] = preBackup.ID
+	}
 	if logErr := s.eventService.LogVolumeEvent(ctx, event.EventTypeVolumeBackupRestore, volumeName, volumeName, user.ID, user.Username, "0", metadata); logErr != nil {
 		slog.WarnContext(ctx, "could not log volume backup restore event", "volume", volumeName, "error", logErr)
 	}
@@ -1020,11 +1111,15 @@ func (s *VolumeService) ListBackupFiles(ctx context.Context, backupID string) ([
 	if err != nil {
 		return nil, err
 	}
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return nil, err
+	}
 	repository, snapshotID, err := s.rusticRepositoryForBackupInternal(ctx, dockerClient, &entry)
 	if err != nil {
 		return nil, err
 	}
-	return s.engine.ListSnapshotFiles(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotID, "", true)
+	return s.engine.ListSnapshotFiles(ctx, dockerClient, repository, password, snapshotID, "", true)
 }
 
 // BrowseBackupFiles returns one lazy-loaded page from a volume backup tree.
@@ -1061,7 +1156,11 @@ func (s *VolumeService) backupFileEntriesInternal(ctx context.Context, entry *Vo
 	if err != nil {
 		return nil, err
 	}
-	listed, err := s.engine.ListSnapshotFiles(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotID, browsePath+"/", recursive)
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	listed, err := s.engine.ListSnapshotFiles(ctx, dockerClient, repository, password, snapshotID, browsePath+"/", recursive)
 	if err != nil {
 		return nil, err
 	}
@@ -1106,7 +1205,11 @@ func (s *VolumeService) resolveVolumeBackupRestoreSelectionInternal(ctx context.
 		eligible = backupbrowser.BuildEntries(resolved.archivePaths, "", true)
 	} else {
 		var listed []string
-		listed, err = s.engine.ListSnapshotFiles(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotID, "", true)
+		password, passwordErr := s.volumeBackupPasswordInternal(ctx)
+		if passwordErr != nil {
+			return volumeBackupRestoreSelectionInternal{}, passwordErr
+		}
+		listed, err = s.engine.ListSnapshotFiles(ctx, dockerClient, repository, password, snapshotID, "", true)
 		eligible = backupbrowser.BuildEntries(listed, "", true)
 	}
 	if err != nil {
@@ -1127,9 +1230,13 @@ func (s *VolumeService) restoreVolumeBackupSelectionInternal(ctx context.Context
 		members := archiveMembersForSelectionInternal(selection.archivePaths, selection.entries)
 		return s.restoreArchiveBackupFilesInternal(ctx, dockerClient, volumeName, backupID, members)
 	}
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return err
+	}
 	target := mount.Mount{Type: mount.TypeVolume, Source: volumeName, Target: "/volume"}
 	if selection.globalRoot {
-		if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotID, target, backup.RestoreOptions{DeleteExtra: true}); err != nil {
+		if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, password, snapshotID, target, backup.RestoreOptions{DeleteExtra: true}); err != nil {
 			return fmt.Errorf("failed to restore Rustic snapshot: %w", err)
 		}
 		return nil
@@ -1140,7 +1247,7 @@ func (s *VolumeService) restoreVolumeBackupSelectionInternal(ctx context.Context
 			sourcePath += "/"
 		}
 		options := backup.RestoreOptions{DeleteExtra: selectedEntry.IsDirectory, SourcePath: sourcePath, DestinationPath: path.Join(target.Target, selectedEntry.Path)}
-		if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, s.rusticPasswordInternal(), snapshotID, target, options); err != nil {
+		if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, password, snapshotID, target, options); err != nil {
 			return fmt.Errorf("failed to restore %s from Rustic snapshot: %w", selectedEntry.Path, err)
 		}
 	}
@@ -1273,6 +1380,10 @@ func (s *VolumeService) downloadRusticBackupInternal(ctx context.Context, entry 
 	if err != nil {
 		return nil, 0, err
 	}
+	password, err := s.volumeBackupPasswordInternal(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
 	scratchVolume := "arcane-rustic-download-" + uuid.New().String()
 	if _, err := dockerClient.VolumeCreate(ctx, client.VolumeCreateOptions{Name: scratchVolume, Labels: volumehelper.Labels()}); err != nil {
 		return nil, 0, fmt.Errorf("failed to create download scratch volume: %w", err)
@@ -1280,7 +1391,7 @@ func (s *VolumeService) downloadRusticBackupInternal(ctx context.Context, entry 
 	removeScratch := func() {
 		_, _ = dockerClient.VolumeRemove(context.WithoutCancel(ctx), scratchVolume, client.VolumeRemoveOptions{Force: true})
 	}
-	if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, s.rusticPasswordInternal(), entry.LocalSnapshotID, mount.Mount{Type: mount.TypeVolume, Source: scratchVolume, Target: "/volume"}, backup.RestoreOptions{DeleteExtra: true}); err != nil {
+	if err := s.engine.RestoreSnapshot(ctx, dockerClient, repository, password, entry.LocalSnapshotID, mount.Mount{Type: mount.TypeVolume, Source: scratchVolume, Target: "/volume"}, backup.RestoreOptions{DeleteExtra: true}); err != nil {
 		removeScratch()
 		return nil, 0, fmt.Errorf("failed to restore Rustic snapshot for download: %w", err)
 	}

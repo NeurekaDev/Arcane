@@ -251,6 +251,7 @@ func (e *Engine) ReadSnapshotTextFile(ctx context.Context, dockerClient *client.
 type DiscoveredSnapshot struct {
 	ID      string    `json:"id"`
 	Time    time.Time `json:"time"`
+	Label   string    `json:"label"`
 	Summary struct {
 		TotalBytesProcessed int64 `json:"total_bytes_processed"`
 	} `json:"summary"`
@@ -290,6 +291,20 @@ func (e *Engine) ForgetSnapshots(ctx context.Context, dockerClient *client.Clien
 		return errors.New("at least one snapshot ID is required")
 	}
 	_, err := e.runInternal(ctx, dockerClient, repository, password, append([]string{"forget", "--prune", "--"}, snapshotIDs...))
+	return err
+}
+
+// ChangeRepositoryPassword re-keys the repository from currentPassword to
+// newPassword. Rustic resolves the new password from the RUSTIC_NEW_PASSWORD
+// variable via the env: prefix, because a literal password argument is not
+// supported.
+func (e *Engine) ChangeRepositoryPassword(ctx context.Context, dockerClient *client.Client, repository Repository, currentPassword, newPassword string) error {
+	if strings.TrimSpace(newPassword) == "" {
+		return errors.New("new repository password is required")
+	}
+	environment := append(slices.Clone(repository.Environment), "RUSTIC_NEW_PASSWORD="+newPassword)
+	repository.Environment = environment
+	_, err := e.runInternal(ctx, dockerClient, repository, currentPassword, []string{"key", "passwd", "--new-password", "env:RUSTIC_NEW_PASSWORD"})
 	return err
 }
 

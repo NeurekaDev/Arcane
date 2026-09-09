@@ -17,6 +17,8 @@
 	import SelectWithLabel from '#lib/components/form/select-with-label.svelte';
 	import TextInputWithLabel from '#lib/components/form/text-input-with-label.svelte';
 	import { systemBackupService } from '#lib/services/system-backup-service.js';
+	import { volumeBackupService } from '#lib/services/volume-backup-service.js';
+	import { openConfirmDialog } from '#lib/components/confirm-dialog/index.js';
 	import { hasPermission } from '#lib/utils/auth.js';
 	import { backupDestinationOptions, backupPolicyDestinationDisplay, s3DestinationOptions } from '#lib/utils/backups.js';
 	import type { SearchPaginationSortRequest } from '#lib/types/shared.js';
@@ -314,8 +316,9 @@
 	}
 
 	// With a stored key the S3 repositories are scanned automatically, so
-	// remote snapshots just appear in the table; the manual Find S3 backups
-	// flow only exists for fresh instances that must supply an old key.
+	// remote snapshots just appear in the table. System and volume backups are
+	// discovered per destination; one unreachable destination must not block
+	// the others, so failures are logged and the rest still import.
 	let autoDiscovered = false;
 	$effect(() => {
 		if (autoDiscovered || !policyCollection.recoveryKeyStored || data.destinations.length === 0) return;
@@ -323,8 +326,19 @@
 		void (async () => {
 			const operationResult = await tryCatch(
 				(async () => {
-					const counts = await Promise.all(data.destinations.map((item) => systemBackupService.discover(item.id, '')));
-					if (counts.some((count) => count > 0)) await refresh();
+					const results = await Promise.allSettled([
+						...data.destinations.map((item) => systemBackupService.discover(item.id, '')),
+						...data.destinations.map((item) => volumeBackupService.discoverBackups(item.id))
+					]);
+					let discovered = 0;
+					for (const result of results) {
+						if (result.status === 'rejected') {
+							console.warn('S3 backup discovery failed', result.reason);
+							continue;
+						}
+						discovered += typeof result.value === 'number' ? result.value : result.value.count;
+					}
+					if (discovered > 0) await refresh();
 				})()
 			);
 			if (operationResult.error !== null) {
@@ -334,6 +348,31 @@
 			}
 		})();
 	});
+
+	// Discovered volume backups may reference a volume that does not exist on
+	// this instance; restoring creates it before the snapshot is written.
+	function openVolumeRestore(backup: BackupHistoryEntry) {
+		openConfirmDialog({
+			title: m.volumes_backup_restore_title(),
+			message: m.volumes_backup_restore_message({ volumeName: backup.resourceName }),
+			confirm: {
+				label: m.volumes_backups_restore(),
+				action: async () => {
+					const operationResult = await tryCatch(
+						(async () => {
+							const result = await volumeBackupService.restoreBackup(backup.resourceName, backup.id);
+							toast.success(m.volumes_backup_restore_success(), activityToastOptions(extractActivityId(result)));
+						})()
+					);
+					if (operationResult.error !== null) {
+						const error = operationResult.error;
+
+						toast.error(error instanceof Error ? error.message : m.common_failed());
+					}
+				}
+			}
+		});
+	}
 
 	const backupActivity = useBackupActivity(
 		() => '0',
@@ -768,6 +807,7 @@
 				onChanged={(options) => systemBackupService.listHistory(options)}
 				onRestore={(item) => openAction('restore', item)}
 				onRestoreFiles={openRestoreFiles}
+				onRestoreVolume={openVolumeRestore}
 				onUpload={(item) => openAction('upload', item)}
 				onDelete={(item) => openAction('delete', item)}
 				onOpenVolume={openVolumeBackups}
