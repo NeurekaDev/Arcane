@@ -318,11 +318,11 @@
 	// With a stored key the S3 repositories are scanned automatically, so
 	// remote snapshots just appear in the table. System and volume backups are
 	// discovered per destination; one unreachable destination must not block
-	// the others, so failures are logged and the rest still import.
-	let autoDiscovered = false;
+	// the others, so failures are logged and the rest still import. Discovery
+	// is idempotent on the backend, so re-running it on invalidation only
+	// imports snapshots that are not known yet.
 	$effect(() => {
-		if (autoDiscovered || !policyCollection.recoveryKeyStored || data.destinations.length === 0) return;
-		autoDiscovered = true;
+		if (!policyCollection.recoveryKeyStored || data.destinations.length === 0) return;
 		void (async () => {
 			const operationResult = await tryCatch(
 				(async () => {
