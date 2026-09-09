@@ -21,6 +21,7 @@ import (
 	"emperror.dev/errors"
 	"gorm.io/gorm"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/actors"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/backup"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/common"
@@ -479,7 +480,9 @@ func (s *VolumeService) legacyVolumePasswordInternal() string {
 
 // volumeBackupPasswordInternal returns the Rustic password for volume backup
 // repositories: the recovery key once one is stored, otherwise the legacy
-// instance-key derivation that predates recovery-key volume backups.
+// instance-key derivation that predates recovery-key volume backups. The
+// legacy-to-recovery-key migration must succeed before the recovery key is
+// returned, so operations never open a legacy repository with the new key.
 func (s *VolumeService) volumeBackupPasswordInternal(ctx context.Context) (string, error) {
 	if s.recoveryKeys == nil {
 		return s.legacyVolumePasswordInternal(), nil
@@ -491,28 +494,28 @@ func (s *VolumeService) volumeBackupPasswordInternal(ctx context.Context) (strin
 	if err != nil {
 		return "", err
 	}
-	s.ensureRepositoriesRekeyedInternal(ctx, key)
+	if err := s.ensureRepositoriesRekeyedInternal(ctx, key); err != nil {
+		return "", err
+	}
 	return key, nil
 }
 
 // ensureRepositoriesRekeyedInternal runs the one-time legacy-to-recovery-key
-// migration once per process for a given key. A failed attempt is retried on
-// the next password resolution so a transient backend outage cannot leave
-// repositories unopenable until restart.
-func (s *VolumeService) ensureRepositoriesRekeyedInternal(ctx context.Context, key string) {
+// migration once per process for a given key and only reports success after
+// every repository was re-keyed. Concurrent callers wait for the in-flight
+// attempt; a failed attempt is retried on the next password resolution so a
+// transient backend outage cannot leave repositories unopenable until restart.
+func (s *VolumeService) ensureRepositoriesRekeyedInternal(ctx context.Context, key string) error {
 	s.rekeyMu.Lock()
-	attempted := s.rekeyAttemptedKey == key
-	s.rekeyAttemptedKey = key
-	s.rekeyMu.Unlock()
-	if attempted {
-		return
+	defer s.rekeyMu.Unlock()
+	if s.rekeyDoneKey == key {
+		return nil
 	}
 	if err := s.MigrateRepositoryPasswords(ctx); err != nil {
-		s.rekeyMu.Lock()
-		s.rekeyAttemptedKey = ""
-		s.rekeyMu.Unlock()
-		slog.WarnContext(ctx, "failed to re-key volume backup repositories to the recovery key", "error", err.Error())
+		return fmt.Errorf("failed to re-key volume backup repositories to the recovery key; retry the operation: %w", err)
 	}
+	s.rekeyDoneKey = key
+	return nil
 }
 
 func (s *VolumeService) localRusticRepositoryInternal(ctx context.Context, dockerClient *client.Client, readOnly bool) (backup.Repository, error) {
@@ -528,19 +531,22 @@ func (s *VolumeService) localRusticRepositoryInternal(ctx context.Context, docke
 }
 
 func (s *VolumeService) remoteRusticRepositoryInternal(ctx context.Context, destinationID string) (backup.Repository, error) {
-	instanceID := strings.TrimSpace(s.settingsService.GetSettingsConfig().InstanceID.Value)
-	if instanceID == "" {
-		return backup.Repository{}, errors.New("arcane instance ID is unavailable")
-	}
-	return s.remoteRusticRepositoryForInstanceInternal(ctx, destinationID, instanceID)
+	return s.remoteRusticRepositoryForInstanceInternal(ctx, destinationID, "")
 }
 
 // remoteRusticRepositoryForInstanceInternal addresses the volume repository
 // root of a specific Arcane instance. Discovered backups reference the root
-// they were found in, so restores and deletes must target that instance.
+// they were found in, so restores and deletes must target that instance; an
+// empty instance falls back to this instance's own root.
 func (s *VolumeService) remoteRusticRepositoryForInstanceInternal(ctx context.Context, destinationID, instanceID string) (backup.Repository, error) {
 	if s.s3Destinations == nil {
 		return backup.Repository{}, errors.New("S3 backup service is unavailable")
+	}
+	if strings.TrimSpace(instanceID) == "" {
+		instanceID = strings.TrimSpace(s.settingsService.GetSettingsConfig().InstanceID.Value)
+	}
+	if instanceID == "" {
+		return backup.Repository{}, errors.New("arcane instance ID is unavailable")
 	}
 	configuration, err := s.s3Destinations.Configuration(ctx, destinationID)
 	if err != nil {
@@ -558,14 +564,7 @@ func (s *VolumeService) rusticRepositoryForBackupInternal(ctx context.Context, d
 		return repository, entry.LocalSnapshotID, err
 	}
 	if entry.RemoteSnapshotID != "" {
-		instanceID := strings.TrimSpace(entry.RemoteInstanceID)
-		if instanceID == "" {
-			instanceID = strings.TrimSpace(s.settingsService.GetSettingsConfig().InstanceID.Value)
-		}
-		if instanceID == "" {
-			return backup.Repository{}, "", errors.New("arcane instance ID is unavailable")
-		}
-		repository, err := s.remoteRusticRepositoryForInstanceInternal(ctx, entry.S3DestinationID, instanceID)
+		repository, err := s.remoteRusticRepositoryForInstanceInternal(ctx, entry.S3DestinationID, entry.RemoteInstanceID)
 		return repository, entry.RemoteSnapshotID, err
 	}
 	return backup.Repository{}, "", errors.New("volume backup has no Rustic snapshot")
@@ -1065,6 +1064,11 @@ func (s *VolumeService) RestoreBackup(ctx context.Context, volumeName, backupID 
 	var preBackup *VolumeBackup
 	var createdVolume bool
 	if _, inspectErr := dockerClient.VolumeInspect(ctx, volumeName, client.VolumeInspectOptions{}); inspectErr != nil {
+		// Only a genuine not-found enters the create branch; a transient
+		// daemon failure must not skip the safety pre-restore backup.
+		if !cerrdefs.IsNotFound(inspectErr) {
+			return fmt.Errorf("failed to inspect volume for restore: %w", inspectErr)
+		}
 		if _, createErr := dockerClient.VolumeCreate(ctx, client.VolumeCreateOptions{Name: volumeName}); createErr != nil {
 			return fmt.Errorf("failed to create missing volume for restore: %w", createErr)
 		}

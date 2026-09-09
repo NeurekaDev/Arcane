@@ -48,7 +48,7 @@ type VolumeService struct {
 	encryptionKey             string
 	recoveryKeys              *backup.RecoveryKeyStore
 	rekeyMu                   sync.Mutex
-	rekeyAttemptedKey         string
+	rekeyDoneKey              string
 	workspaceMaxDepth         int
 	workspaceMaxEntries       int
 	workspaceMaxFileSizeBytes int64

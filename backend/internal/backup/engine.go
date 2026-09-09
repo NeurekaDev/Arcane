@@ -430,6 +430,7 @@ type SystemBackupRecoveryConfig struct {
 	EncryptedRecoveryKey string `gorm:"column:encrypted_recovery_key;type:text;not null"`
 }
 
+// TableName pins the singleton recovery-key row to its existing table.
 func (SystemBackupRecoveryConfig) TableName() string { return "system_backup_recovery_config" }
 
 // ValidateRecoveryKey rejects keys outside the generated shape.
@@ -461,6 +462,7 @@ type RecoveryKeyStore struct {
 	db *database.DB
 }
 
+// NewRecoveryKeyStore builds a store backed by the application database.
 func NewRecoveryKeyStore(db *database.DB) *RecoveryKeyStore {
 	return &RecoveryKeyStore{db: db}
 }

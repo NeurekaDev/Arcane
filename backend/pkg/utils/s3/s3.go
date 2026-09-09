@@ -268,7 +268,7 @@ func ListRepositoryRoots(ctx context.Context, configuration Configuration, root 
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure S3 repository listing: %w", err)
 	}
-	prefix := path.Join("/", configuration.Prefix, strings.Trim(root, "/")) + "/"
+	prefix := path.Join(configuration.Prefix, strings.Trim(root, "/")) + "/"
 	var roots []string
 	paginator := awss3.NewListObjectsV2Paginator(client, &awss3.ListObjectsV2Input{
 		Bucket:    aws.String(configuration.Bucket),
