@@ -34,6 +34,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/projects"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/utils"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/utils/backupbrowser"
+	s3utils "github.com/getarcaneapp/arcane/backend/v2/pkg/utils/s3"
 	activitytypes "github.com/getarcaneapp/arcane/types/v2/activity"
 	backuptypes "github.com/getarcaneapp/arcane/types/v2/backup"
 	volumetypes "github.com/getarcaneapp/arcane/types/v2/volume"
@@ -2036,4 +2037,178 @@ func (s *VolumeService) disableMissingS3Internal(ctx context.Context, policy *Vo
 	}
 	s.rescheduleVolumeBackupPolicyInternal(ctx, policy)
 	return true, nil
+}
+
+// systemRecoverySnapshotLabel marks snapshots created by the system backup
+// domain; they never belong to a volume.
+const systemRecoverySnapshotLabel = "arcane-system-recovery"
+
+// DiscoverRemoteBackups imports every snapshot found in the destination's
+// per-instance volume backup repositories into the volume backup history.
+// Snapshots are mapped back to their volume through the label Rustic records
+// at creation time and remember which instance root they came from, so a
+// fresh instance can restore backups pushed by another instance. Per-root
+// failures (for example an unopenable legacy repository) are returned as
+// messages without blocking the other roots.
+func (s *VolumeService) DiscoverRemoteBackups(ctx context.Context, destinationID string) (int, []string, error) {
+	if s.engine == nil || s.s3Destinations == nil || s.recoveryKeys == nil {
+		return 0, nil, errors.New("volume backup discovery is unavailable")
+	}
+	key, err := s.recoveryKeys.Get(ctx)
+	if errors.Is(err, backup.ErrRecoveryKeyNotConfigured) {
+		return 0, nil, errors.New("configure a recovery key in system backups before discovering volume backups")
+	}
+	if err != nil {
+		return 0, nil, err
+	}
+	configuration, err := s.s3Destinations.Configuration(ctx, destinationID)
+	if err != nil {
+		return 0, nil, errors.New("the selected S3 backup destination is not configured")
+	}
+	roots, err := s3utils.ListRepositoryRoots(ctx, configuration, "arcane-volume-backups")
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to list volume backup repositories: %w", err)
+	}
+	var knownIDs []string
+	if err := s.db.WithContext(ctx).Model(&VolumeBackup{}).
+		Where("s3_destination_id = ? AND remote_snapshot_id <> ''", destinationID).
+		Pluck("remote_snapshot_id", &knownIDs).Error; err != nil {
+		return 0, nil, err
+	}
+	known := make(map[string]struct{}, len(knownIDs))
+	for _, id := range knownIDs {
+		known[id] = struct{}{}
+	}
+	dockerClient, err := s.dockerService.GetClient(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	created := 0
+	var failures []string
+	for _, root := range roots {
+		repository, repoErr := s.remoteRusticRepositoryForInstanceInternal(ctx, destinationID, root)
+		if repoErr != nil {
+			failures = append(failures, fmt.Sprintf("instance %s: %v", root, repoErr))
+			continue
+		}
+		snapshots, snapErr := s.engine.ListSnapshots(ctx, dockerClient, repository, key)
+		if snapErr != nil {
+			failures = append(failures, fmt.Sprintf("instance %s: %v", root, snapErr))
+			continue
+		}
+		for _, snapshot := range snapshots {
+			entry := discoveredVolumeBackupInternal(destinationID, root, snapshot)
+			if entry == nil {
+				continue
+			}
+			if _, exists := known[snapshot.ID]; exists {
+				continue
+			}
+			known[snapshot.ID] = struct{}{}
+			if err := s.db.WithContext(ctx).Create(entry).Error; err != nil {
+				return created, failures, fmt.Errorf("failed to save discovered volume backup: %w", err)
+			}
+			created++
+		}
+	}
+	if len(failures) > 0 {
+		slog.WarnContext(ctx, "volume backup discovery completed with failures", "destination", destinationID, "created", created, "failedRoots", len(failures))
+	}
+	return created, failures, nil
+}
+
+// discoveredVolumeBackupInternal maps a remote snapshot to a volume backup
+// record for the given destination and instance root. Snapshots without a
+// volume label (or created by the system recovery repository) map to nothing.
+func discoveredVolumeBackupInternal(destinationID, root string, snapshot backup.DiscoveredSnapshot) *VolumeBackup {
+	volumeName := strings.TrimSpace(snapshot.Label)
+	if volumeName == "" || volumeName == systemRecoverySnapshotLabel {
+		return nil
+	}
+	createdAt := snapshot.Time
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	entry := &VolumeBackup{
+		VolumeName: volumeName, Size: snapshot.Summary.TotalBytesProcessed, CreatedAt: createdAt,
+		Status: VolumeBackupStatusSucceeded, Trigger: VolumeBackupTriggerManual,
+		Destination: volumetypes.BackupDestinationS3, Format: VolumeBackupFormatRustic,
+		RemoteSnapshotID: snapshot.ID, S3DestinationID: destinationID, RemoteInstanceID: root,
+	}
+	entry.ID = fmt.Sprintf("remote-%s-%s-%s", destinationID, root, snapshot.ID)
+	return entry
+}
+
+// MigrateRepositoryPasswords re-keys this instance's volume backup
+// repositories from the legacy instance-key derivation to the recovery key.
+// It is idempotent: repositories already keyed by the recovery key are
+// detected and skipped, and missing repositories are ignored. Only this
+// instance's local repository and S3 root are migrated; other instances
+// sharing a destination re-key their own roots on their own startup, so
+// instances sharing a destination should be upgraded together.
+func (s *VolumeService) MigrateRepositoryPasswords(ctx context.Context) error {
+	if s.recoveryKeys == nil || s.engine == nil {
+		return nil
+	}
+	key, err := s.recoveryKeys.Get(ctx)
+	if errors.Is(err, backup.ErrRecoveryKeyNotConfigured) {
+		slog.DebugContext(ctx, "volume backup re-key skipped: no recovery key configured")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	dockerClient, err := s.dockerService.GetClient(ctx)
+	if err != nil {
+		return err
+	}
+	legacy := s.legacyVolumePasswordInternal()
+	var rekeyErr error
+	if err := s.rekeyVolumeRepositoryInternal(ctx, dockerClient, "volumes:local", func(readOnly bool) (backup.Repository, error) {
+		return s.localRusticRepositoryInternal(ctx, dockerClient, readOnly)
+	}, legacy, key); err != nil {
+		rekeyErr = errors.Combine(rekeyErr, fmt.Errorf("local repository: %w", err))
+	}
+	if s.s3Destinations != nil {
+		destinations, listErr := s.s3Destinations.ListS3DestinationsByID(ctx)
+		if listErr != nil {
+			return errors.Combine(rekeyErr, fmt.Errorf("failed to list S3 destinations for re-key: %w", listErr))
+		}
+		instanceID := strings.TrimSpace(s.settingsService.GetSettingsConfig().InstanceID.Value)
+		if instanceID == "" {
+			return errors.Combine(rekeyErr, errors.New("arcane instance ID is unavailable"))
+		}
+		for destinationID := range destinations {
+			if err := s.rekeyVolumeRepositoryInternal(ctx, dockerClient, "volumes:s3:"+destinationID+":"+instanceID, func(bool) (backup.Repository, error) {
+				return s.remoteRusticRepositoryForInstanceInternal(ctx, destinationID, instanceID)
+			}, legacy, key); err != nil {
+				rekeyErr = errors.Combine(rekeyErr, fmt.Errorf("destination %s: %w", destinationID, err))
+			}
+		}
+	}
+	return rekeyErr
+}
+
+// rekeyVolumeRepositoryInternal converts one repository when it still opens
+// with the legacy password. A repository that already lists with the recovery
+// key is skipped; one that cannot be opened at all (missing or foreign) is
+// reported so the remaining repositories still migrate.
+func (s *VolumeService) rekeyVolumeRepositoryInternal(ctx context.Context, dockerClient *client.Client, repositoryID string, openRepository func(bool) (backup.Repository, error), legacyPassword, recoveryKey string) error {
+	repository, err := openRepository(true)
+	if err != nil {
+		return err
+	}
+	if _, listErr := s.engine.ListSnapshots(ctx, dockerClient, repository, recoveryKey); listErr == nil {
+		slog.DebugContext(ctx, "volume backup repository already uses the recovery key", "repository", repositoryID)
+		return nil
+	}
+	readWrite, err := openRepository(false)
+	if err != nil {
+		return err
+	}
+	if err := s.engine.ChangeRepositoryPassword(ctx, dockerClient, readWrite, legacyPassword, recoveryKey); err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "Re-keyed volume backup repository to the recovery key", "repository", repositoryID)
+	return nil
 }

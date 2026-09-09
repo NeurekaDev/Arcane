@@ -73,4 +73,3 @@ func (p SystemBackupPolicy) ToDTO(lastRun *SystemBackupRun) backuptypes.SystemBa
 	}
 	return dto
 }
-
