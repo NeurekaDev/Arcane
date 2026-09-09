@@ -1,4 +1,8 @@
+import { toast } from 'svelte-sonner';
 import { m } from '#lib/paraglide/messages.js';
+import { systemBackupService } from '#lib/services/system-backup-service.js';
+import { volumeBackupService } from '#lib/services/volume-backup-service.js';
+import { tryCatch } from '#lib/utils/try-catch.js';
 import type {
 	BackupDestination,
 	BackupManagementType,
@@ -116,4 +120,66 @@ export function backupPolicyUpdateFromPolicy(policy: BackupPolicy, includeStopCo
 		s3DestinationId: policy.s3DestinationId ?? '',
 		...(includeStopContainers ? { stopContainers: policy.stopContainers ?? false } : {})
 	};
+}
+
+// Scanning opens and lists every configured Rustic repository, which costs
+// several S3 requests per destination, so automatic runs are serialized and
+// throttled for the whole client session and explicit runs bypass the
+// throttle because the destination was just connected.
+const DISCOVERY_THROTTLE_MS = 5 * 60 * 1000;
+let discoveryInFlight = false;
+let discoveryCompletedAt = 0;
+
+// discoverDestinationBackups scans one destination for system and volume
+// backups that already exist on it and toasts the outcome. It is meant for
+// explicit triggers such as right after the destination was added.
+export async function discoverDestinationBackups(destinationId: string): Promise<void> {
+	const policiesResult = await tryCatch(systemBackupService.getPolicies());
+	if (policiesResult.error !== null || !policiesResult.data.recoveryKeyStored) return;
+	const systemResult = await tryCatch(systemBackupService.discover(destinationId, ''));
+	if (systemResult.error === null && systemResult.data > 0) {
+		toast.success(m.system_backups_discovered({ count: systemResult.data }));
+	}
+	const volumeResult = await tryCatch(volumeBackupService.discoverBackups(destinationId));
+	if (volumeResult.error === null) {
+		if (volumeResult.data.count > 0) {
+			toast.success(m.volume_backups_discovered({ count: volumeResult.data.count }));
+		}
+		for (const failure of volumeResult.data.errors ?? []) {
+			toast.warning(m.volume_backups_discover_failed(), { description: failure });
+		}
+	} else {
+		toast.error(volumeResult.error instanceof Error ? volumeResult.error.message : m.volume_backups_discover_failed());
+	}
+}
+
+// runAutomaticBackupDiscovery scans every configured destination silently and
+// reports whether any snapshots were newly imported, so the caller can
+// refresh. Concurrent calls coalesce into the in-flight run and repeated
+// calls within the throttle window are skipped, so reactive updates never
+// cause redundant S3 repository scans. Backend discovery is idempotent and
+// only imports snapshots that are not known yet.
+export async function runAutomaticBackupDiscovery(destinations: { id: string }[]): Promise<boolean> {
+	if (discoveryInFlight || destinations.length === 0 || Date.now() - discoveryCompletedAt < DISCOVERY_THROTTLE_MS) {
+		return false;
+	}
+	discoveryInFlight = true;
+	try {
+		const results = await Promise.allSettled([
+			...destinations.map((item) => systemBackupService.discover(item.id, '')),
+			...destinations.map((item) => volumeBackupService.discoverBackups(item.id))
+		]);
+		let discovered = 0;
+		for (const result of results) {
+			if (result.status === 'rejected') {
+				console.warn('S3 backup discovery failed', result.reason);
+				continue;
+			}
+			discovered += typeof result.value === 'number' ? result.value : result.value.count;
+		}
+		return discovered > 0;
+	} finally {
+		discoveryInFlight = false;
+		discoveryCompletedAt = Date.now();
+	}
 }

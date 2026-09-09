@@ -20,7 +20,12 @@
 	import { volumeBackupService } from '#lib/services/volume-backup-service.js';
 	import { openConfirmDialog } from '#lib/components/confirm-dialog/index.js';
 	import { hasPermission } from '#lib/utils/auth.js';
-	import { backupDestinationOptions, backupPolicyDestinationDisplay, s3DestinationOptions } from '#lib/utils/backups.js';
+	import {
+		backupDestinationOptions,
+		backupPolicyDestinationDisplay,
+		runAutomaticBackupDiscovery,
+		s3DestinationOptions
+	} from '#lib/utils/backups.js';
 	import type { SearchPaginationSortRequest } from '#lib/types/shared.js';
 	import type {
 		BackupHistoryEntry,
@@ -316,37 +321,14 @@
 	}
 
 	// With a stored key the S3 repositories are scanned automatically, so
-	// remote snapshots just appear in the table. System and volume backups are
-	// discovered per destination; one unreachable destination must not block
-	// the others, so failures are logged and the rest still import. Discovery
-	// is idempotent on the backend, so re-running it on invalidation only
-	// imports snapshots that are not known yet.
+	// remote snapshots just appear in the table. Scanning opens and lists every
+	// configured repository, so the shared helper serializes runs and throttles
+	// them; backend discovery is idempotent and only imports unknown snapshots.
 	$effect(() => {
 		if (!policyCollection.recoveryKeyStored || data.destinations.length === 0) return;
-		void (async () => {
-			const operationResult = await tryCatch(
-				(async () => {
-					const results = await Promise.allSettled([
-						...data.destinations.map((item) => systemBackupService.discover(item.id, '')),
-						...data.destinations.map((item) => volumeBackupService.discoverBackups(item.id))
-					]);
-					let discovered = 0;
-					for (const result of results) {
-						if (result.status === 'rejected') {
-							console.warn('S3 backup discovery failed', result.reason);
-							continue;
-						}
-						discovered += typeof result.value === 'number' ? result.value : result.value.count;
-					}
-					if (discovered > 0) await refresh();
-				})()
-			);
-			if (operationResult.error !== null) {
-				const error = operationResult.error;
-
-				console.warn('S3 backup discovery failed', error);
-			}
-		})();
+		void runAutomaticBackupDiscovery(data.destinations).then((found) => {
+			if (found) void refresh();
+		});
 	});
 
 	// Discovered volume backups may reference a volume that does not exist on

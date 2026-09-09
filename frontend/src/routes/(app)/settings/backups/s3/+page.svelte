@@ -7,8 +7,7 @@
 	import { RemoteEnvironmentIcon } from '#lib/icons/index.js';
 	import { openConfirmDialog } from '#lib/components/confirm-dialog/index.js';
 	import { s3DestinationService } from '#lib/services/s3-destination-service.js';
-	import { systemBackupService } from '#lib/services/system-backup-service.js';
-	import { volumeBackupService } from '#lib/services/volume-backup-service.js';
+	import { discoverDestinationBackups } from '#lib/utils/backups.js';
 	import type { CreateS3Destination, S3Destination } from '#lib/types/s3-destination.js';
 	import type { SearchPaginationSortRequest } from '#lib/types/shared.js';
 	import * as m from '#lib/paraglide/messages.js';
@@ -59,29 +58,6 @@
 			}
 		} finally {
 			saving = false;
-		}
-	}
-
-	// A freshly connected destination may already hold snapshots pushed by this
-	// or another Arcane instance; scan it immediately so they appear without
-	// waiting for the backups page to do it.
-	async function discoverDestinationBackups(destinationId: string) {
-		const policiesResult = await tryCatch(systemBackupService.getPolicies());
-		if (policiesResult.error !== null || !policiesResult.data.recoveryKeyStored) return;
-		const systemResult = await tryCatch(systemBackupService.discover(destinationId, ''));
-		if (systemResult.error === null && systemResult.data > 0) {
-			toast.success(m.system_backups_discovered({ count: systemResult.data }));
-		}
-		const volumeResult = await tryCatch(volumeBackupService.discoverBackups(destinationId));
-		if (volumeResult.error === null) {
-			if (volumeResult.data.count > 0) {
-				toast.success(m.volume_backups_discovered({ count: volumeResult.data.count }));
-			}
-			for (const failure of volumeResult.data.errors ?? []) {
-				toast.warning(m.volume_backups_discover_failed(), { description: failure });
-			}
-		} else {
-			toast.error(volumeResult.error instanceof Error ? volumeResult.error.message : m.volume_backups_discover_failed());
 		}
 	}
 
