@@ -1,5 +1,6 @@
 import { toast } from 'svelte-sonner';
 import { m } from '#lib/paraglide/messages.js';
+import { environmentStore } from '#lib/stores/environment.store.svelte.js';
 import { systemBackupService } from '#lib/services/system-backup-service.js';
 import { volumeBackupService } from '#lib/services/volume-backup-service.js';
 import { tryCatch } from '#lib/utils/try-catch.js';
@@ -124,10 +125,12 @@ export function backupPolicyUpdateFromPolicy(policy: BackupPolicy, includeStopCo
 
 // Scanning opens and lists every configured Rustic repository, which costs
 // several S3 requests per destination, so automatic runs are serialized and
-// throttled for the whole client session and explicit runs bypass the
-// throttle because the destination was just connected.
+// throttled per environment and destination set for the whole client session,
+// and explicit runs bypass the throttle because the destination was just
+// connected.
 const DISCOVERY_THROTTLE_MS = 5 * 60 * 1000;
 let discoveryInFlight = false;
+let discoveryDoneKey = '';
 let discoveryCompletedAt = 0;
 
 // discoverDestinationBackups scans one destination for system and volume
@@ -156,11 +159,22 @@ export async function discoverDestinationBackups(destinationId: string): Promise
 // runAutomaticBackupDiscovery scans every configured destination silently and
 // reports whether any snapshots were newly imported, so the caller can
 // refresh. Concurrent calls coalesce into the in-flight run and repeated
-// calls within the throttle window are skipped, so reactive updates never
-// cause redundant S3 repository scans. Backend discovery is idempotent and
-// only imports snapshots that are not known yet.
+// calls for the same environment and destination set within the throttle
+// window are skipped, so reactive updates never cause redundant S3 repository
+// scans. Switching environments or adding a destination produces a new key
+// and scans again. Backend discovery is idempotent and only imports
+// snapshots that are not known yet.
 export async function runAutomaticBackupDiscovery(destinations: { id: string }[]): Promise<boolean> {
-	if (discoveryInFlight || destinations.length === 0 || Date.now() - discoveryCompletedAt < DISCOVERY_THROTTLE_MS) {
+	const environmentId = await environmentStore.getCurrentEnvironmentId();
+	const runKey = `${environmentId}:${destinations
+		.map((item) => item.id)
+		.sort()
+		.join(',')}`;
+	if (
+		discoveryInFlight ||
+		destinations.length === 0 ||
+		(runKey === discoveryDoneKey && Date.now() - discoveryCompletedAt < DISCOVERY_THROTTLE_MS)
+	) {
 		return false;
 	}
 	discoveryInFlight = true;
@@ -180,6 +194,7 @@ export async function runAutomaticBackupDiscovery(destinations: { id: string }[]
 		return discovered > 0;
 	} finally {
 		discoveryInFlight = false;
+		discoveryDoneKey = runKey;
 		discoveryCompletedAt = Date.now();
 	}
 }
