@@ -41,7 +41,8 @@
 		outlineOpen = $bindable(false),
 		diffOpen = $bindable(false),
 		commandPaletteOpen = $bindable(false),
-		variant = 'card'
+		variant = 'card',
+		gitEditUrl
 	}: {
 		title: string;
 		open?: boolean;
@@ -62,14 +63,42 @@
 		diffOpen?: boolean;
 		commandPaletteOpen?: boolean;
 		variant?: 'card' | 'plain';
+		gitEditUrl?: string | null;
 	} = $props();
 
 	const isMobile = new IsMobile();
 	const effectiveAutoHeight = $derived(autoHeight || isMobile.current);
+	const editUrl = $derived(readOnly && !(enableDiff && diffOpen) && gitEditUrl ? gitEditUrl : null);
+
+	// CodeMirror's gutters, search panel and tooltips share this wrapper.
+	function isEditorText(target: EventTarget | null): boolean {
+		return target instanceof Element && !!target.closest('.cm-content');
+	}
+
+	function handleEditorClick(event: MouseEvent) {
+		if (!editUrl || !isEditorText(event.target)) return;
+		if (!window.getSelection()?.isCollapsed) return;
+		window.open(editUrl, '_blank', 'noopener,noreferrer');
+	}
+
+	function handleEditorKeydown(event: KeyboardEvent) {
+		if (!editUrl || event.key !== 'Enter') return;
+		if (event.target !== event.currentTarget && !isEditorText(event.target)) return;
+		event.preventDefault();
+		window.open(editUrl, '_blank', 'noopener,noreferrer');
+	}
 </script>
 
 {#snippet editorBody()}
-	<div class="{effectiveAutoHeight ? '' : 'relative flex-1'} min-h-0 w-full min-w-0">
+	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+	<div
+		class="{effectiveAutoHeight ? '' : 'relative flex-1'} min-h-0 w-full min-w-0 {editUrl ? 'cursor-pointer' : ''}"
+		role={editUrl ? 'link' : undefined}
+		tabindex={editUrl ? 0 : undefined}
+		title={editUrl ? m.git_edit_file_in_repository() : undefined}
+		onclick={handleEditorClick}
+		onkeydown={handleEditorKeydown}
+	>
 		<div class={effectiveAutoHeight ? '' : 'absolute inset-0'}>
 			<CodeEditor
 				bind:value

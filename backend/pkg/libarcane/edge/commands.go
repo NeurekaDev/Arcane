@@ -21,6 +21,8 @@ var commandRoutes = []commandRoute{
 	{Method: http.MethodGet, PathPattern: "/api/environments/{id}/containers/counts", CommandName: "container.counts"},
 	{Method: http.MethodPost, PathPattern: "/api/environments/{id}/containers", CommandName: "container.create"},
 	{Method: http.MethodGet, PathPattern: "/api/environments/{id}/containers/{containerId}", CommandName: "container.inspect"},
+	{Method: http.MethodGet, PathPattern: "/api/environments/{id}/containers/{containerId}/edit-config", CommandName: "container.edit_config"},
+	{Method: http.MethodPost, PathPattern: "/api/environments/{id}/containers/{containerId}/edit", CommandName: "container.edit"},
 	{Method: http.MethodPost, PathPattern: "/api/environments/{id}/containers/{containerId}/start", CommandName: "container.start"},
 	{Method: http.MethodPost, PathPattern: "/api/environments/{id}/containers/{containerId}/stop", CommandName: "container.stop"},
 	{Method: http.MethodPost, PathPattern: "/api/environments/{id}/containers/{containerId}/restart", CommandName: "container.restart"},

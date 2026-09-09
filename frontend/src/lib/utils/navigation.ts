@@ -167,22 +167,21 @@ export function toSafeHref(raw: string, scheme: string = 'https'): string {
 
 // --- Git URL helpers ---
 
+type GitRoute = 'commit' | 'tree' | 'blob' | 'edit';
+
 function stripGitSuffix(path: string): string {
-	return path.replace(/\.git\/?$/, '');
+	return path.replace(/\.git\/?$/, '').replace(/\/+$/, '');
 }
 
-function trimTrailingSlash(value: string): string {
-	return value.replace(/\/+$/, '');
+function encodePathSegments(value: string): string {
+	return value
+		.split('/')
+		.filter(Boolean)
+		.map((segment) => encodeURIComponent(segment))
+		.join('/');
 }
 
-function commitSegmentForHost(hostname: string): string {
-	const host = hostname.toLowerCase();
-	if (host.includes('gitlab')) return '/-/commit/';
-	if (host.includes('bitbucket')) return '/commits/';
-	return '/commit/';
-}
-
-function toGitWebUrl(raw: string): string | null {
+export function toGitWebUrl(raw: string): string | null {
 	const trimmed = raw.trim();
 	if (!trimmed) return null;
 
@@ -192,8 +191,11 @@ function toGitWebUrl(raw: string): string | null {
 			if (!parsed.hostname) return null;
 			const path = stripGitSuffix(parsed.pathname);
 			if (!path || path === '/') return null;
-			const protocol = parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.protocol : 'https:';
-			return `${protocol}//${parsed.hostname}${path}`;
+			const isWebProtocol = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+			const protocol = isWebProtocol ? parsed.protocol : 'https:';
+			// An ssh:// port is the SSH port, not the forge's web port.
+			const host = isWebProtocol ? parsed.host : parsed.hostname;
+			return `${protocol}//${host}${path}`;
 		} catch {
 			return null;
 		}
@@ -208,16 +210,30 @@ function toGitWebUrl(raw: string): string | null {
 	return path ? `https://${host}/${path}` : null;
 }
 
-export function toGitCommitUrl(repositoryUrl: string, commit: string): string | null {
-	const base = toGitWebUrl(repositoryUrl);
-	const trimmedCommit = commit.trim();
-	if (!base || !trimmedCommit) return null;
+// Only hostnames that name their product are recognized; a self-hosted forge on a neutral domain gets no deep link.
+function gitRouteSegment(hostname: string, route: GitRoute): string | null {
+	const host = hostname.toLowerCase();
+	if (host.includes('gitlab')) return `/-/${route}/`;
+	// Bitbucket has no dedicated edit route; /src/ opens the file with its own edit action.
+	if (host.includes('bitbucket')) return route === 'commit' ? '/commits/' : '/src/';
+	if (host.includes('gitea') || host.includes('forgejo') || host.includes('codeberg')) {
+		if (route === 'edit') return '/_edit/';
+		return route === 'commit' ? '/commit/' : '/src/branch/';
+	}
+	if (host.includes('github') || route === 'commit') return `/${route}/`;
+	return null;
+}
 
-	const normalizedBase = trimTrailingSlash(base);
+export function toGitRouteUrl(repositoryUrl: string, route: GitRoute, ref: string, path = ''): string | null {
+	const base = toGitWebUrl(repositoryUrl);
+	const encodedRef = encodePathSegments(ref.trim());
+	if (!base || !encodedRef) return null;
+
 	try {
-		const host = new URL(normalizedBase).hostname;
-		const segment = commitSegmentForHost(host);
-		return `${normalizedBase}${segment}${encodeURIComponent(trimmedCommit)}`;
+		const segment = gitRouteSegment(new URL(base).hostname, route);
+		if (!segment) return null;
+		const encodedPath = encodePathSegments(path);
+		return `${base}${segment}${encodedRef}${encodedPath ? `/${encodedPath}` : ''}`;
 	} catch {
 		return null;
 	}

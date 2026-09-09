@@ -20,6 +20,12 @@ func TestResolveEdgeCommandName(t *testing.T) {
 		shouldHit bool
 	}{
 		{name: "container list", method: "GET", path: "/api/environments/0/containers", command: "container.list", shouldHit: true},
+		{name: "container edit config", method: "GET", path: "/api/environments/0/containers/abc/edit-config", command: "container.edit_config", shouldHit: true},
+		{name: "container edit", method: "POST", path: "/api/environments/0/containers/abc/edit", command: "container.edit", shouldHit: true},
+		{name: "container edit config wrong method", method: "POST", path: "/api/environments/0/containers/abc/edit-config", command: "container.edit_config", shouldHit: false},
+		{name: "container edit wrong method", method: "GET", path: "/api/environments/0/containers/abc/edit", command: "container.edit", shouldHit: false},
+		{name: "container edit config stream rejected", method: "GET", path: "/api/environments/0/containers/abc/edit-config", stream: true, command: "container.edit_config", shouldHit: false},
+		{name: "container edit stream rejected", method: "POST", path: "/api/environments/0/containers/abc/edit", stream: true, command: "container.edit", shouldHit: false},
 		{name: "container start", method: "POST", path: "/api/environments/0/containers/abc/start", command: "container.start", shouldHit: true},
 		{name: "volume workspace download", method: "GET", path: "/api/environments/0/volumes/data/workspace/file/download?relativePath=notes/readme.txt", command: "volume.workspace.download", shouldHit: true},
 		{name: "volume workspace list", method: "GET", path: "/api/environments/0/volumes/data/workspace", command: "volume.workspace.list", shouldHit: true},
@@ -57,9 +63,9 @@ func TestResolveEdgeCommandName(t *testing.T) {
 
 			command, ok := ResolveEdgeCommandName(tc.method, tc.path, tc.stream).Get()
 			require.Equal(t, tc.shouldHit, ok)
+			require.Equal(t, tc.shouldHit, ValidateEdgeCommand(tc.command, tc.method, tc.path, tc.stream))
 			if tc.shouldHit {
 				require.Equal(t, tc.command, command)
-				require.True(t, ValidateEdgeCommand(tc.command, tc.method, tc.path, tc.stream))
 			}
 		})
 	}
