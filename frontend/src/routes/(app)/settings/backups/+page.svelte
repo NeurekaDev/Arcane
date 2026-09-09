@@ -7,7 +7,8 @@
 	import { toast } from 'svelte-sonner';
 	import settingsStore from '#lib/stores/config-store.js';
 	import { SettingsPageLayout, type SettingsActionButton } from '#lib/layouts/index.js';
-	import { AlertIcon, BackupIcon, CloudStorageIcon, InfoIcon, LockIcon, ResetIcon } from '#lib/icons/index.js';
+	import { AlertIcon, BackupIcon, CloudStorageIcon, InfoIcon, LockIcon, ResetIcon, UploadIcon } from '#lib/icons/index.js';
+	import { openConfirmDialog } from '#lib/components/confirm-dialog/index.js';
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { CopyButton } from '#lib/components/ui/copy-button/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
@@ -49,6 +50,9 @@
 	let scheduleType = $state<'system' | 'volume'>('system');
 	let editingScheduleId = $state<string | undefined>();
 	let keyOpen = $state(false);
+	let importKeyOpen = $state(false);
+	let importKeyInput = $state('');
+	let importingKey = $state(false);
 	let actionOpen = $state(false);
 	let action = $state<'create' | 'restore' | 'upload' | 'delete' | 'discover'>('create');
 	let selected = $state<BackupHistoryEntry | null>(null);
@@ -109,6 +113,10 @@
 		Boolean(restoreFilesKeyError) ||
 			(!policyCollection.recoveryKeyStored && !recoveryKeyPattern.test(restoreFilesRecoveryKey.trim()))
 	);
+	const importKeyError = $derived(
+		importKeyInput.length > 0 && !recoveryKeyPattern.test(importKeyInput.trim()) ? m.system_backups_recovery_key_required() : ''
+	);
+	const importKeyInvalid = $derived(Boolean(importKeyError) || !recoveryKeyPattern.test(importKeyInput.trim()));
 	const keyError = $derived(
 		actionNeedsTypedKey && recoveryKey.length > 0 && !recoveryKeyPattern.test(recoveryKey.trim())
 			? m.system_backups_recovery_key_required()
@@ -139,7 +147,7 @@
 
 	// Generating persists the key in the same step; the dialog only ever shows
 	// an already-saved key, with one job: get the user to store it elsewhere.
-	async function openRecoveryKey() {
+	async function generateAndStoreRecoveryKey() {
 		newRecoveryKey = '';
 		generatingKey = true;
 		try {
@@ -159,6 +167,51 @@
 			}
 		} finally {
 			generatingKey = false;
+		}
+	}
+
+	// Rotating a stored key invalidates repositories keyed by the old one, so
+	// it must be confirmed; first-time setup has nothing to lose.
+	function openRecoveryKey() {
+		if (!policyCollection.recoveryKeyStored) {
+			void generateAndStoreRecoveryKey();
+			return;
+		}
+		openConfirmDialog({
+			title: m.system_backups_reset_recovery_key(),
+			message: m.system_backups_reset_recovery_key_confirm_message(),
+			confirm: {
+				label: m.system_backups_reset_recovery_key(),
+				destructive: true,
+				action: () => generateAndStoreRecoveryKey()
+			}
+		});
+	}
+
+	function openImportKey() {
+		importKeyInput = '';
+		importKeyOpen = true;
+	}
+
+	async function importRecoveryKey() {
+		if (importingKey || importKeyInvalid) return;
+		importingKey = true;
+		try {
+			const operationResult = await tryCatch(
+				(async () => {
+					await systemBackupService.setRecoveryKey(importKeyInput.trim());
+					policyCollection = { ...policyCollection, recoveryKeyStored: true };
+					importKeyOpen = false;
+					toast.success(m.system_backups_recovery_key_saved());
+				})()
+			);
+			if (operationResult.error !== null) {
+				const error = operationResult.error;
+
+				toast.error(error instanceof Error ? error.message : m.system_backups_recovery_key_save_failed());
+			}
+		} finally {
+			importingKey = false;
 		}
 	}
 
@@ -428,19 +481,20 @@
 	}
 
 	const actionButtons: SettingsActionButton[] = $derived.by(() => [
-		...(policyCollection.recoveryKeyStored && canManageRecoveryKey
-			? [
-					{
-						id: 'reset-recovery-key',
-						action: 'refresh',
-						icon: ResetIcon,
-						label: m.system_backups_reset_recovery_key(),
-						loading: generatingKey,
-						onclick: openRecoveryKey,
-						disabled: isReadOnly
-					} satisfies SettingsActionButton
-				]
-			: []),
+		{
+			id: 'create',
+			action: 'create',
+			label: m.common_create(),
+			disabled: isReadOnly,
+			options: [
+				{ label: m.jobs_schedule(), onclick: () => openSchedule() },
+				{
+					label: m.volumes_workspace_backup(),
+					onclick: () => openAction('create'),
+					disabled: backupActivity.activeIds.length > 0
+				}
+			]
+		},
 		{
 			id: 's3-destinations',
 			action: 'edit',
@@ -459,20 +513,31 @@
 					} satisfies SettingsActionButton
 				]
 			: []),
-		{
-			id: 'create',
-			action: 'create',
-			label: m.common_create(),
-			disabled: isReadOnly,
-			options: [
-				{ label: m.jobs_schedule(), onclick: () => openSchedule() },
-				{
-					label: m.volumes_workspace_backup(),
-					onclick: () => openAction('create'),
-					disabled: backupActivity.activeIds.length > 0
-				}
-			]
-		}
+		...(canManageRecoveryKey
+			? [
+					{
+						id: 'recovery-key',
+						action: 'edit',
+						icon: LockIcon,
+						label: m.system_backups_recovery_key(),
+						disabled: isReadOnly,
+						options: [
+							{
+								label: policyCollection.recoveryKeyStored
+									? m.system_backups_reset_recovery_key()
+									: m.system_backups_create_recovery_key(),
+								icon: ResetIcon,
+								onclick: () => openRecoveryKey()
+							},
+							{
+								label: m.system_backups_import_recovery_key(),
+								icon: UploadIcon,
+								onclick: () => openImportKey()
+							}
+						]
+					} satisfies SettingsActionButton
+				]
+			: [])
 	]);
 </script>
 
@@ -522,6 +587,45 @@
 		{/snippet}
 		{#snippet footer()}
 			<ArcaneButton action="confirm" customLabel={m.common_done()} onclick={() => (keyOpen = false)} />
+		{/snippet}
+	</ResponsiveDialog>
+{/snippet}
+
+{#snippet importKeyDialog()}
+	<ResponsiveDialog
+		bind:open={importKeyOpen}
+		title={m.system_backups_import_recovery_key()}
+		description={m.system_backups_import_recovery_key_description()}
+		contentClass="sm:max-w-[560px]"
+	>
+		{#snippet children()}
+			<div class="space-y-3 py-2">
+				<TextInputWithLabel
+					value={importKeyInput}
+					onChange={(value) => (importKeyInput = value)}
+					error={importKeyError || null}
+					label={m.system_backups_recovery_key()}
+					description={m.system_backups_recovery_key_required()}
+					type="password"
+					autocomplete="current-password"
+				/>
+				{#if policyCollection.recoveryKeyStored}
+					<Alert.Root variant="destructive">
+						<AlertIcon class="size-4" />
+						<Alert.Description>{m.system_backups_import_recovery_key_alert()}</Alert.Description>
+					</Alert.Root>
+				{/if}
+			</div>
+		{/snippet}
+		{#snippet footer()}
+			<ArcaneButton action="cancel" onclick={() => (importKeyOpen = false)} disabled={importingKey} />
+			<ArcaneButton
+				action="save"
+				customLabel={m.system_backups_import_recovery_key()}
+				onclick={importRecoveryKey}
+				loading={importingKey}
+				disabled={importingKey || importKeyInvalid}
+			/>
 		{/snippet}
 	</ResponsiveDialog>
 {/snippet}
@@ -793,6 +897,7 @@
 		{/if}
 
 		{@render recoveryKeyDialog()}
+		{@render importKeyDialog()}
 		{@render actionDialog()}
 		{@render restoreFilesDialog()}
 	{/snippet}
